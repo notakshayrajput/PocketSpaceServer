@@ -7,10 +7,11 @@ using System.IO.Compression;
 namespace PocketSpaceServer.Controllers
 {
     [ApiController]
-    [Route("[controller]")]
+    [Route("api/[controller]")]
     public class DownloadController : ControllerBase
     {
         private readonly DirectorySettings _dirSettings;
+        private const long MaxFileSizeGB=10L;
 
         public DownloadController(IOptions<DirectorySettings> dirSettings)
         {
@@ -18,7 +19,7 @@ namespace PocketSpaceServer.Controllers
         }
 
         [HttpPost]
-        [RequestSizeLimit(2L * 1024L * 1024 * 1024L)]
+        [RequestSizeLimit(MaxFileSizeGB * 1024L * 1024 * 1024L)]
         public async Task<IActionResult> StreamZip([FromBody] DownloadRequest request)
         {
             if (request.Paths == null || request.Paths.Length == 0)
@@ -83,15 +84,16 @@ namespace PocketSpaceServer.Controllers
 
         private IActionResult ZipFolder(string folderPath, string folderName)
         {
-            var memoryStream = new MemoryStream();
+            var tempZipPath = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid()}.zip");
 
-            using (var zipArchive = new ZipArchive(memoryStream, ZipArchiveMode.Create, leaveOpen: true))
+            using (var fs = new FileStream(tempZipPath, FileMode.Create, FileAccess.Write, FileShare.None))
+            using (var zipArchive = new ZipArchive(fs, ZipArchiveMode.Create, leaveOpen: false))
             {
                 AddDirectoryToZipStreaming(zipArchive, folderPath, folderName);
             }
 
-            memoryStream.Position = 0;
-            return File(memoryStream, "application/zip", $"{folderName}.zip");
+            var fileStream = new FileStream(tempZipPath, FileMode.Open, FileAccess.Read);
+            return File(fileStream, "application/zip", $"{folderName}.zip");
         }
 
         private void AddDirectoryToZipStreaming(ZipArchive archive, string sourceDir, string entryRoot)
