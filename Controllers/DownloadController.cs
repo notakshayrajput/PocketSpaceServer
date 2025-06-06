@@ -11,7 +11,7 @@ namespace PocketSpaceServer.Controllers
     public class DownloadController : ControllerBase
     {
         private readonly DirectorySettings _dirSettings;
-        private const long MaxFileSizeGB=10L;
+        private const long MaxFileSizeGB=40L;
 
         public DownloadController(IOptions<DirectorySettings> dirSettings)
         {
