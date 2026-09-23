@@ -1,3 +1,5 @@
+using System.Net.WebSockets;
+using System.Text;
 using Microsoft.Extensions.Options;
 using PocketSpaceServer.Models;
 
@@ -14,7 +16,7 @@ builder.Services.AddCors(options =>
 {
     options.AddPolicy("AllowViteFrontend", policy =>
     {
-        policy.WithOrigins("https://localhost:5173") // Vite dev server
+        policy.WithOrigins("http://localhost:5173", "https://localhost:5173") // Vite dev server
               .AllowAnyHeader()
               .AllowAnyMethod()
               .WithExposedHeaders("Content-Disposition");
@@ -43,6 +45,46 @@ if (app.Environment.IsDevelopment())
 }
 
 app.UseCors("AllowViteFrontend");
+app.UseWebSockets();
+
+app.Map("/ws", async context =>
+{
+    if (!context.WebSockets.IsWebSocketRequest)
+    {
+        context.Response.StatusCode = StatusCodes.Status400BadRequest;
+        return;
+    }
+
+    using var socket = await context.WebSockets.AcceptWebSocketAsync();
+    var stateMessage = Encoding.UTF8.GetBytes("server-state:Idle");
+    await socket.SendAsync(
+        stateMessage,
+        WebSocketMessageType.Text,
+        endOfMessage: true,
+        context.RequestAborted);
+
+    var buffer = new byte[1024];
+    try
+    {
+        while (socket.State == WebSocketState.Open &&
+               !context.RequestAborted.IsCancellationRequested)
+        {
+            var result = await socket.ReceiveAsync(buffer, context.RequestAborted);
+            if (result.MessageType == WebSocketMessageType.Close)
+            {
+                await socket.CloseAsync(
+                    WebSocketCloseStatus.NormalClosure,
+                    "Client closed the connection.",
+                    CancellationToken.None);
+            }
+        }
+    }
+    catch (OperationCanceledException)
+    {
+        // The browser disconnected or the development server is stopping.
+    }
+});
+
 // Ensure TargetDirectory exists
 using (var scope = app.Services.CreateScope())
 {
@@ -54,7 +96,12 @@ using (var scope = app.Services.CreateScope())
     }
 }
 
-app.UseHttpsRedirection();
+// Vite proxies /api to the local HTTP endpoint during development. Production
+// traffic should still be redirected to HTTPS by the application or its proxy.
+if (!app.Environment.IsDevelopment())
+{
+    app.UseHttpsRedirection();
+}
 
 app.UseAuthorization();
 
