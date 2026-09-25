@@ -1,12 +1,13 @@
 using Microsoft.EntityFrameworkCore;
 using PocketSpaceServer.Data;
 using PocketSpaceServer.Models;
+using PocketSpaceServer.Storage;
 
 namespace PocketSpaceServer.Authentication;
 
 public sealed class AccountStorageMiddleware(RequestDelegate next)
 {
-    public async Task InvokeAsync(HttpContext context, AccountOperationLocks operations, ApplicationDbContext db, TimeProvider clock)
+    public async Task InvokeAsync(HttpContext context, AccountOperationLocks operations, ApplicationDbContext db, TimeProvider clock, FileCatalog catalog)
     {
         var path = context.Request.Path;
         var id = context.User.FindFirst("sub")?.Value;
@@ -33,7 +34,18 @@ public sealed class AccountStorageMiddleware(RequestDelegate next)
         }
         var originalCancellation = context.RequestAborted;
         context.RequestAborted = lifetime.Token;
-        try { await next(context); }
+        try
+        {
+            // Finish interrupted trash/restore operations before allowing path reuse.
+            try { await catalog.RecoverAsync(context.User); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+            {
+                context.Response.StatusCode = StatusCodes.Status409Conflict;
+                await context.Response.WriteAsJsonAsync(new { message = "A file operation is still pending. Please try again." });
+                return;
+            }
+            await next(context);
+        }
         catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { context.Abort(); }
         finally { context.RequestAborted = originalCancellation; }
     }

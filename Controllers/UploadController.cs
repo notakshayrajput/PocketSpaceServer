@@ -7,7 +7,7 @@ namespace PocketSpaceServer.Controllers;
 [ApiController]
 [Route("api/upload")]
 [StorageErrors]
-public class UploadController(UserStorage storage) : ControllerBase
+public class UploadController(UserStorage storage, FileCatalog catalog) : ControllerBase
 {
     [HttpPost]
     [RequestSizeLimit(50L * 1024 * 1024 * 1024)]
@@ -23,8 +23,9 @@ public class UploadController(UserStorage storage) : ControllerBase
         }).ToArray();
         for (var index = 0; index < request.Files.Count; index++)
         {
-            await using var stream = new FileStream(paths[index], FileMode.Create, FileAccess.Write, FileShare.None);
-            await request.Files[index].CopyToAsync(stream, HttpContext.RequestAborted);
+            await using (var stream = new FileStream(paths[index], FileMode.Create, FileAccess.Write, FileShare.None))
+                await request.Files[index].CopyToAsync(stream, HttpContext.RequestAborted);
+            await catalog.TouchAsync(User, new[] { paths[index] });
         }
         return Ok(new { message = "Files uploaded successfully." });
     }

@@ -16,6 +16,9 @@
     }
     public class FileSystemEntry
     {
+        public string Id { get; set; } = null!;
+        public bool IsFavorite { get; set; }
+        public DateTime RecentAt { get; set; }
         public string Name { get; set; } = null!;
         public bool IsFolder { get; set; }
         public long Size { get; set; } // in bytes, 0 for folders

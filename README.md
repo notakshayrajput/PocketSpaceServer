@@ -31,7 +31,7 @@ Restart the API after updating. The additive `PasswordResetRequests` migration r
 
 ## Signup, approval, and automatic deletion
 
-Signup starts a seven-day UTC deadline. Pending users can immediately browse, upload, download, create folders, rename, and delete within their own folder. Deleting through the file manager is permanent and requires confirmation in the client; trash/restore is future work. The client displays the exact pending-account deletion deadline and a **Check approval** action.
+Signup starts a seven-day UTC deadline. Pending users can immediately browse, upload, download, create folders, rename, and move items to Trash within their own folder. Trash retains items for seven days with restore available before the deadline. The client displays the exact pending-account deletion deadline and a **Check approval** action. Account expiry still removes the entire private workspace, including Trash; trash retention does not extend an unapproved account's lifetime.
 
 Admins use **Approvals** in the sidebar (`/admin/users`) to see pending accounts and approve them. The API endpoints are `GET /api/admin/users/pending` and `POST /api/admin/users/{id}/approve`; both require the `Admin` role. Approval preserves the existing folder and removes the deletion deadline. Expired accounts cannot be rescued by approval.
 
@@ -39,7 +39,29 @@ At exactly seven days, unapproved accounts cannot log in or access APIs, even us
 
 File operations, approval, and cleanup coordinate with per-account locks in this single-server application. Pending file transfers are canceled at account expiry. Run one API instance against a SQLite database and its storage; multiple API processes would need distributed coordination before sharing this setup.
 
-The `PendingAccounts` migration marks pre-existing accounts as approved. It does not move or delete the administrator's existing files. Retained file bytes still live on disk; database-backed file metadata and sharing permissions remain future work.
+The `PendingAccounts` migration marks pre-existing accounts as approved. It does not move or delete the administrator's existing files. Retained file bytes still live on disk. The `FileFavoritesAndTrash` migration adds file identity, favorites, recent activity, and trash metadata; sharing permissions remain future work.
+
+## Favorites, Recent files, and Trash
+
+- **Home** shows all favorite files and the 20 most recently used files. Star/unstar files in the explorer or Home. Favorites are saved per user in SQLite and survive app-managed file/folder renames and trash restoration.
+- Recent activity updates on successful uploads, accepted downloads (including files inside downloaded folders), renames, and restores. Favoriting and browsing do not change the order. Existing disk files are discovered on Home/browse and initially use their disk modification time. Home indexes the local tree; this implementation is intended for the existing small, single-server workspace.
+- **Move to Trash** replaces permanent deletion for both files and folders. The item disappears from Files, Favorites, Recent files, and downloads. Trashing a folder keeps its contents together. Each trash item has its own ID, original location, size, UTC trash date, and exact seven-day expiry.
+- **Trash** (`/trash`) lists retained items and their deletion dates. Restore returns an item to its original location with its original file IDs and favorites. Restore refuses to overwrite an existing item; rename or trash the conflicting item first. If the original parent folder is missing, restore or recreate it first.
+- Restore is unavailable at or after the deadline. Cleanup runs at startup and once per minute, deleting only expired items from private trash. If the server was offline or a storage deletion fails, cleanup retries. Files still in Trash count toward occupied storage until purged.
+- Bytes live under a reserved `.pocketspace-trash/<trash-id>` directory inside each user's storage root. Normal path APIs, recursive downloads, and listings cannot access this directory. Per-account locks coordinate file actions, trash cleanup, and pending-account cleanup. Durable move/restore/purge states allow interrupted trash operations to finish after restart.
+- Existing files stay in place; the additive migration runs on server startup. Back up both the SQLite database and the full storage directory, including hidden trash directories. Perform renames and replacements through PocketSpace to preserve identity and favorites; manual disk edits are not an identity-aware sync mechanism.
+
+Endpoints (all require authentication and operate only on the current user's data):
+
+| Endpoint | Behavior |
+| --- | --- |
+| `GET /api/space/home` | `{ favorites, recent }` file collections. |
+| `PUT /api/space/files/{id}/favorite` | Set `{ "isFavorite": true/false }`. |
+| `DELETE /api/space/entry?path=...` | Move a file or folder to Trash. |
+| `GET /api/space/trash` | List retained items, original paths, and expiry dates. |
+| `POST /api/space/trash/{id}/restore` | Restore before expiry; `404` for unavailable IDs, `409` for location conflicts, `410` for expired items awaiting cleanup. |
+
+Restart the API after updating so the new migration and cleanup worker are active.
 
 ## Configuration
 
@@ -65,4 +87,4 @@ dotnet test tests/PocketSpaceServer.Tests/PocketSpaceServer.Tests.csproj --confi
 
 Tests use isolated temporary SQLite databases and storage folders. They cover admin seeding, password persistence, lockout, token validation, API protection, authenticated WebSockets, signup, private-file isolation and management, admin-only approval, the seven-day expiry boundary, and cleanup retries.
 
-Password-flow integration tests cover generic/coalesced requests, admin-only resets, password validation, lockout recovery, revoked tokens, expired accounts, and rate limiting. File metadata, quotas, and granular sharing permissions remain future work.
+Password-flow integration tests cover generic/coalesced requests, admin-only resets, password validation, lockout recovery, revoked tokens, expired accounts, and rate limiting. File-library tests cover favorites, recency, existing-file discovery, rename/restore identity, folder trash, name collisions, private trash isolation, exact expiry, interrupted operations, and cleanup retries. Quotas, richer file metadata, and granular sharing permissions remain future work.

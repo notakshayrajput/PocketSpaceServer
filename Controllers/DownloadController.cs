@@ -8,7 +8,7 @@ namespace PocketSpaceServer.Controllers;
 [ApiController]
 [Route("api/download")]
 [StorageErrors]
-public class DownloadController(UserStorage storage) : ControllerBase
+public class DownloadController(UserStorage storage, FileCatalog catalog) : ControllerBase
 {
     [HttpPost]
     public async Task<IActionResult> StreamZip(DownloadRequest request)
@@ -17,6 +17,7 @@ public class DownloadController(UserStorage storage) : ControllerBase
         var paths = request.Paths.Select(path => storage.Resolve(User, path)).Distinct().ToArray();
         if (paths.Any(path => !System.IO.File.Exists(path) && !Directory.Exists(path)))
             return NotFound(new { message = "File or folder not found." });
+        await catalog.TouchAsync(User, paths);
         if (paths.Length == 1 && System.IO.File.Exists(paths[0]))
             return PhysicalFile(paths[0], "application/octet-stream", Path.GetFileName(paths[0]));
 
