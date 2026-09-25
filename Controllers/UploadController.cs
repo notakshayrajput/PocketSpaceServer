@@ -1,59 +1,39 @@
 ﻿using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.Extensions.Options;
-using PocketSpaceServer.Models;
+using PocketSpaceServer.Storage;
 
-namespace PocketSpaceServer.Controllers
+namespace PocketSpaceServer.Controllers;
+
+[ApiController]
+[Route("api/upload")]
+[StorageErrors]
+public class UploadController(UserStorage storage) : ControllerBase
 {
-    [ApiController]
-    [Route("api/[controller]")]
-    public class UploadController : ControllerBase
+    [HttpPost]
+    [RequestSizeLimit(50L * 1024 * 1024 * 1024)]
+    public async Task<IActionResult> UploadFiles([FromForm] FileUploadRequest request)
     {
-        private readonly DirectorySettings _dirSettings;
-
-        public UploadController(IOptions<DirectorySettings> dirSettings)
+        if (request.Files.Count == 0) return BadRequest(new { message = "No files uploaded." });
+        var destination = storage.Resolve(User, request.DestinationPath);
+        if (!Directory.Exists(destination)) return NotFound(new { message = "Folder not found." });
+        var paths = request.Files.Select(file =>
         {
-            _dirSettings = dirSettings.Value;
-        }
-
-        [HttpPost]
-        [RequestSizeLimit(50L * 1024 * 1024 * 1024)] // 50GB upload size limit
-        public async Task<IActionResult> UploadFiles([FromForm] FileUploadRequest request)
+            UserStorage.ValidateName(file.FileName);
+            return storage.Resolve(User, Path.Combine(request.DestinationPath, file.FileName));
+        }).ToArray();
+        for (var index = 0; index < request.Files.Count; index++)
         {
-            if (request.Files == null || request.Files.Count == 0)
-                return BadRequest("No files uploaded.");
-
-            if (string.IsNullOrWhiteSpace(request.DestinationPath))
-                return BadRequest("Destination path not specified.");
-
-            var uploadRoot = Path.GetFullPath(_dirSettings.TargetDirectory);
-            var destFullPath = Path.GetFullPath(Path.Combine(uploadRoot, request.DestinationPath));
-
-            // Prevent path traversal
-            if (!destFullPath.StartsWith(uploadRoot))
-                return BadRequest("Invalid destination path.");
-
-            Directory.CreateDirectory(destFullPath);
-
-            foreach (var file in request.Files)
-            {
-                var filePath = Path.Combine(destFullPath, Path.GetFileName(file.FileName));
-                using (var stream = new FileStream(filePath, FileMode.Create))
-                {
-                    await file.CopyToAsync(stream);
-                }
-            }
-
-            return Ok(new { Message = "Files uploaded successfully." });
+            await using var stream = new FileStream(paths[index], FileMode.Create, FileAccess.Write, FileShare.None);
+            await request.Files[index].CopyToAsync(stream, HttpContext.RequestAborted);
         }
+        return Ok(new { message = "Files uploaded successfully." });
     }
+}
 
-    public class FileUploadRequest
-    {
-        [FromForm]
-        public List<IFormFile> Files { get; set; }
-
-        [FromForm]
-        public string DestinationPath { get; set; }
-    }
+public sealed class FileUploadRequest
+{
+    [FromForm]
+    public List<IFormFile> Files { get; set; } = [];
+    [FromForm]
+    public string DestinationPath { get; set; } = ".";
 }

@@ -32,3 +32,9 @@ msbuild.wrn
 
 # Visual Studio 2015
 .vs/
+
+# Local database and development signing key
+App_Data/
+*.db
+*.db-shm
+*.db-wal
