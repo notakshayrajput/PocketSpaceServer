@@ -23,6 +23,7 @@
         public bool IsFolder { get; set; }
         public long Size { get; set; } // in bytes, 0 for folders
         public DateTime LastModified { get; set; }
+        public DateTime CreatedAt { get; set; }
         public string RelativePath { get; set; } = null!;
     }
 

@@ -16,6 +16,26 @@ namespace PocketSpaceServer.Tests;
 public class FileLibraryTests
 {
     [Fact]
+    public async Task FolderListingIncludesCreationTimesForFilesAndFolders()
+    {
+        await using var app = new TestApplication();
+        using var client = app.CreateClient();
+        var user = await SignIn(client);
+        (await client.PostAsJsonAsync("/api/space/folders", new { parentPath = ".", name = "photos" })).EnsureSuccessStatusCode();
+        await Upload(client, "trip.txt", "holiday");
+
+        var files = (await client.GetFromJsonAsync<FolderInfo>("/api/space/folder-info"))!.Files;
+        using var scope = app.Services.CreateScope();
+        var root = scope.ServiceProvider.GetRequiredService<UserStorage>().Root(Principal(user));
+        var file = Assert.Single(files, item => item.Name == "trip.txt");
+        var folder = Assert.Single(files, item => item.Name == "photos");
+        Assert.Equal(File.GetCreationTimeUtc(Path.Combine(root, "trip.txt")), file.CreatedAt);
+        Assert.Equal(Directory.GetCreationTimeUtc(Path.Combine(root, "photos")), folder.CreatedAt);
+        Assert.Equal(DateTimeKind.Utc, file.CreatedAt.Kind);
+        Assert.Equal(DateTimeKind.Utc, folder.CreatedAt.Kind);
+    }
+
+    [Fact]
     public async Task FavoritesPersistAcrossRequestsAndRenameOfParentFolder()
     {
         await using var app = new TestApplication();

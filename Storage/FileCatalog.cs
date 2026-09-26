@@ -53,7 +53,9 @@ public sealed class FileCatalog(ApplicationDbContext db, UserStorage storage, Ti
         var path = storage.Resolve(user, record.RelativePath);
         return new FileSystemEntry { Id = record.Id, Name = Path.GetFileName(path), RelativePath = record.RelativePath,
             IsFolder = record.IsFolder, IsFavorite = record.IsFavorite, RecentAt = record.RecentAt,
-            LastModified = File.GetLastWriteTimeUtc(path), Size = record.IsFolder ? 0 : new FileInfo(path).Length };
+            LastModified = record.IsFolder ? Directory.GetLastWriteTimeUtc(path) : File.GetLastWriteTimeUtc(path),
+            CreatedAt = record.IsFolder ? Directory.GetCreationTimeUtc(path) : File.GetCreationTimeUtc(path),
+            Size = record.IsFolder ? 0 : new FileInfo(path).Length };
     }
 
     public async Task<HomeFiles> HomeAsync(ClaimsPrincipal user)
