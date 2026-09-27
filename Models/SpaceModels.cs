@@ -6,6 +6,7 @@
         public long AvailableSpace { get; set; }
         public long TotalSpace { get; set; }
         public long OccupiedSpace { get; set; }
+        public long QuotaBytes { get; set; }
     }
     public class FolderInfo
     {

@@ -14,6 +14,7 @@ public class ApplicationDbContext(DbContextOptions<ApplicationDbContext> options
     protected override void OnModelCreating(ModelBuilder builder)
     {
         base.OnModelCreating(builder);
+        builder.Entity<ApplicationUser>().Property(u => u.QuotaBytes).HasDefaultValue(UserQuota.DefaultBytes);
         builder.Entity<FileRecord>().HasOne<ApplicationUser>().WithMany().HasForeignKey(f => f.UserId).OnDelete(DeleteBehavior.Cascade);
         builder.Entity<FileRecord>().HasOne<TrashEntry>().WithMany().HasForeignKey(f => f.TrashEntryId).OnDelete(DeleteBehavior.Cascade);
         builder.Entity<FileRecord>().HasIndex(f => new { f.UserId, f.PathKey }).IsUnique().HasFilter("\"TrashEntryId\" IS NULL");

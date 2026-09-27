@@ -1,4 +1,6 @@
-﻿using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
+using PocketSpaceServer.Data;
 using PocketSpaceServer.Models;
 using PocketSpaceServer.Storage;
 
@@ -7,19 +9,23 @@ namespace PocketSpaceServer.Controllers;
 [ApiController]
 [Route("api/space")]
 [StorageErrors]
-public class SpaceController(UserStorage storage, FileCatalog catalog) : ControllerBase
+public class SpaceController(UserStorage storage, FileCatalog catalog, QuotaUsage quotaUsage,
+    ApplicationDbContext db) : ControllerBase
 {
     [HttpGet("drive-stats")]
     public async Task<ActionResult<DriveStats>> GetStorageStats()
     {
         var root = storage.Root(User);
         var drive = new DriveInfo(Path.GetPathRoot(root)!);
+        var id = User.FindFirst("sub")!.Value;
+        var quotaBytes = await db.Users.Where(u => u.Id == id).Select(u => u.QuotaBytes).SingleAsync();
         return Ok(new DriveStats
         {
             Directory = User.IsInRole("Admin") ? "Storage" : "My files",
             AvailableSpace = drive.AvailableFreeSpace,
             TotalSpace = drive.TotalSize,
-            OccupiedSpace = UserStorage.FilesRecursively(root).Sum(path => new FileInfo(path).Length) + await catalog.TrashSizeAsync(User)
+            OccupiedSpace = await quotaUsage.UsedBytesAsync(User),
+            QuotaBytes = quotaBytes
         });
     }
 

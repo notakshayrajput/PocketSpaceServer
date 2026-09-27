@@ -35,6 +35,7 @@ builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<AccountOperationLocks>();
 builder.Services.AddScoped<UserStorage>();
 builder.Services.AddScoped<FileCatalog>();
+builder.Services.AddScoped<QuotaUsage>();
 builder.Services.AddScoped<TrashCleanup>();
 builder.Services.AddHostedService<TrashCleanupWorker>();
 builder.Services.AddScoped<PendingAccountCleanup>();

@@ -41,6 +41,11 @@ File operations, approval, and cleanup coordinate with per-account locks in this
 
 The `PendingAccounts` migration marks pre-existing accounts as approved. It does not move or delete the administrator's existing files. Retained file bytes still live on disk. The `FileFavoritesAndTrash` migration adds file identity, favorites, recent activity, and trash metadata; sharing permissions remain future work.
 
+## User storage quotas
+
+Each account starts with a 500 MB (MiB) quota, including the original admin account. The additive `UserQuota` migration gives existing accounts the same default without moving files. Existing files are retained even when their usage is already above the default; new uploads must fit within the quota. The Storage Info page shows each user their quota, used space, and remaining space. Active files and retained Trash both count toward usage, so moving a file to Trash does not free quota until it is permanently removed.
+
+Uploads are checked before any file is written. Replacing a file counts only the size difference, and a multi-file request is rejected if the final total would exceed the quota (`413`). Admins can open **User quotas** (`/admin/quotas`) to increase an active account's limit in whole MB. Quotas can only be increased through this API. `GET /api/admin/users` lists active accounts and quotas; `PUT /api/admin/users/{id}/quota` accepts `{ "quotaBytes": 629145600 }` and requires the `Admin` role. `GET /api/space/drive-stats` includes `quotaBytes` and `occupiedSpace` for the signed-in account.
 ## Favorites, Recent files, and Trash
 
 - **Home** shows all favorite files and the 20 most recently used files. Star/unstar files in the explorer or Home. Favorites are saved per user in SQLite and survive app-managed file/folder renames and trash restoration.
@@ -87,4 +92,4 @@ dotnet test tests/PocketSpaceServer.Tests/PocketSpaceServer.Tests.csproj --confi
 
 Tests use isolated temporary SQLite databases and storage folders. They cover admin seeding, password persistence, lockout, token validation, API protection, authenticated WebSockets, signup, private-file isolation and management, admin-only approval, the seven-day expiry boundary, and cleanup retries.
 
-Password-flow integration tests cover generic/coalesced requests, admin-only resets, password validation, lockout recovery, revoked tokens, expired accounts, and rate limiting. File-library tests cover favorites, recency, existing-file discovery, rename/restore identity, folder trash, name collisions, private trash isolation, exact expiry, interrupted operations, and cleanup retries. Quotas, richer file metadata, and granular sharing permissions remain future work.
+Password-flow integration tests cover generic/coalesced requests, admin-only resets, password validation, lockout recovery, revoked tokens, expired accounts, and rate limiting. File-library tests cover favorites, recency, existing-file discovery, rename/restore identity, folder trash, name collisions, private trash isolation, exact expiry, interrupted operations, and cleanup retries. Richer file metadata and granular sharing permissions remain future work. Quota integration tests cover the default, admin-only increases, upload limits, replacements, and Trash accounting.

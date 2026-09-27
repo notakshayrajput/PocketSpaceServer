@@ -16,6 +16,36 @@ namespace PocketSpaceServer.Controllers;
 public class AdminUsersController(ApplicationDbContext db, AccountOperationLocks operations, TimeProvider clock,
     UserManager<ApplicationUser> users) : ControllerBase
 {
+    [HttpGet]
+    public async Task<IActionResult> ListUsers(CancellationToken cancellationToken)
+    {
+        var now = clock.GetUtcNow().UtcDateTime;
+        return Ok(await db.Users.AsNoTracking()
+            .Where(u => u.Status == AccountStatus.Approved ||
+                (u.Status == AccountStatus.Pending && u.PendingExpiresAt > now))
+            .OrderBy(u => u.UserName)
+            .Select(u => new { u.Id, Username = u.UserName, u.Status, u.QuotaBytes })
+            .ToListAsync(cancellationToken));
+    }
+
+    [HttpPut("{id}/quota")]
+    public async Task<IActionResult> IncreaseQuota(string id, ChangeQuotaRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (request.QuotaBytes < UserQuota.DefaultBytes ||
+            request.QuotaBytes % UserQuota.Megabyte != 0)
+            return BadRequest(new { message = "Enter a quota of at least 500 MB in whole MB." });
+        using var lease = await operations.AcquireAsync(id, cancellationToken);
+        var account = await db.Users.SingleOrDefaultAsync(u => u.Id == id, cancellationToken);
+        if (account is null) return NotFound();
+        if (!account.CanAccess(clock.GetUtcNow().UtcDateTime))
+            return Conflict(new { message = "This account is no longer active." });
+        if (request.QuotaBytes <= account.QuotaBytes)
+            return Conflict(new { message = "The new quota must be larger than the current quota." });
+        account.QuotaBytes = request.QuotaBytes;
+        await db.SaveChangesAsync(cancellationToken);
+        return NoContent();
+    }
     [HttpGet("password-reset-requests")]
     public async Task<IActionResult> PasswordResetRequests(CancellationToken cancellationToken)
     {
@@ -79,3 +109,5 @@ public sealed class AdminResetPasswordRequest
     [Required, StringLength(1024, MinimumLength = 8)]
     public string NewPassword { get; init; } = "";
 }
+
+public sealed record ChangeQuotaRequest(long QuotaBytes);
