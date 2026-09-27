@@ -16,6 +16,109 @@ namespace PocketSpaceServer.Tests;
 public class FileLibraryTests
 {
     [Fact]
+    public async Task FolderListingPagesAndSearchesAcrossTheEntireFolder()
+    {
+        await using var app = new TestApplication();
+        using var client = app.CreateClient();
+        var user = await SignIn(client, "alice");
+        using var scope = app.Services.CreateScope();
+        var root = scope.ServiceProvider.GetRequiredService<UserStorage>().Root(Principal(user));
+        for (var i = 0; i < 115; i++)
+            await File.WriteAllTextAsync(Path.Combine(root, $"item{i:000}.txt"), new string('x', i + 1));
+        await File.WriteAllTextAsync(Path.Combine(root, "Report-final.pdf"), "x");
+
+        var first = (await client.GetFromJsonAsync<FolderInfo>("/api/space/folder-info?sortBy=name&direction=asc"))!;
+        Assert.Equal(50, first.Files.Length);
+        Assert.Equal(116, first.TotalCount);
+        Assert.Equal(50, first.NextOffset);
+        Assert.True(first.HasMore);
+        Assert.Equal("item000.txt", first.Files[0].Name);
+        Assert.Equal("item049.txt", first.Files[^1].Name);
+        Assert.Equal(50, await scope.ServiceProvider.GetRequiredService<ApplicationDbContext>().Files.CountAsync());
+
+        var second = (await client.GetFromJsonAsync<FolderInfo>("/api/space/folder-info?sortBy=name&direction=asc&offset=50"))!;
+        var third = (await client.GetFromJsonAsync<FolderInfo>("/api/space/folder-info?sortBy=name&direction=asc&offset=100"))!;
+        Assert.Equal(50, second.Files.Length);
+        Assert.Equal(16, third.Files.Length);
+        Assert.False(third.HasMore);
+        Assert.Equal(116, third.NextOffset);
+        Assert.Equal(116, first.Files.Concat(second.Files).Concat(third.Files).Select(file => file.Name).Distinct().Count());
+
+        var fuzzy = (await client.GetFromJsonAsync<FolderInfo>(
+            "/api/space/folder-info?search=repotr%20finl&sortBy=name&direction=asc"))!;
+        Assert.Equal("Report-final.pdf", Assert.Single(fuzzy.Files).Name);
+        Assert.Equal(1, fuzzy.TotalCount);
+        Assert.False(fuzzy.HasMore);
+        var noMatches = (await client.GetFromJsonAsync<FolderInfo>("/api/space/folder-info?search=unfindable"))!;
+        Assert.Empty(noMatches.Files);
+        Assert.Equal(0, noMatches.TotalCount);
+        Assert.False(noMatches.HasMore);
+    }
+
+    [Fact]
+    public async Task FolderListingKeepsFoldersFirstForEverySortAndSearch()
+    {
+        await using var app = new TestApplication();
+        using var client = app.CreateClient();
+        var user = await SignIn(client, "alice");
+        using var scope = app.Services.CreateScope();
+        var root = scope.ServiceProvider.GetRequiredService<UserStorage>().Root(Principal(user));
+        Directory.CreateDirectory(Path.Combine(root, "a-report"));
+        Directory.CreateDirectory(Path.Combine(root, "z-report"));
+        await File.WriteAllTextAsync(Path.Combine(root, "b-report.txt"), "small");
+        await File.WriteAllTextAsync(Path.Combine(root, "m-report.txt"), "larger file");
+
+        foreach (var sortBy in new[] { "name", "size", "lastModified", "createdAt" })
+        foreach (var direction in new[] { "asc", "desc" })
+        foreach (var search in new[] { "", "repotr" })
+        {
+            var options = $"sortBy={sortBy}&direction={direction}&search={search}&limit=2";
+            var first = (await client.GetFromJsonAsync<FolderInfo>("/api/space/folder-info?" + options))!;
+            var second = (await client.GetFromJsonAsync<FolderInfo>("/api/space/folder-info?" + options + "&offset=2"))!;
+            Assert.Equal(4, first.TotalCount);
+            Assert.Equal(2, first.Files.Length);
+            Assert.All(first.Files, entry => Assert.True(entry.IsFolder));
+            Assert.True(first.HasMore);
+            Assert.Equal(2, second.Files.Length);
+            Assert.All(second.Files, entry => Assert.False(entry.IsFolder));
+            Assert.False(second.HasMore);
+            if (sortBy == "name")
+                Assert.Equal(direction == "asc" ? new[] { "a-report", "z-report" } : new[] { "z-report", "a-report" },
+                    first.Files.Select(entry => entry.Name));
+        }
+    }
+
+    [Fact]
+    public async Task FolderListingSortsBeforePagingAndRejectsInvalidOptions()
+    {
+        await using var app = new TestApplication();
+        using var client = app.CreateClient();
+        var user = await SignIn(client, "alice");
+        using var scope = app.Services.CreateScope();
+        var root = scope.ServiceProvider.GetRequiredService<UserStorage>().Root(Principal(user));
+        foreach (var (name, size, minutes) in new[] { ("a10.txt", 30, 1), ("a2.txt", 10, 3), ("z.txt", 20, 2) })
+        {
+            var path = Path.Combine(root, name);
+            await File.WriteAllTextAsync(path, new string('x', size));
+            File.SetLastWriteTimeUtc(path, new DateTime(2026, 1, 1, 0, minutes, 0, DateTimeKind.Utc));
+        }
+
+        var byName = (await client.GetFromJsonAsync<FolderInfo>("/api/space/folder-info?sortBy=name&direction=asc&limit=2"))!;
+        Assert.Equal(new[] { "a2.txt", "a10.txt" }, byName.Files.Select(file => file.Name));
+        Assert.Equal("z.txt", Assert.Single((await client.GetFromJsonAsync<FolderInfo>(
+            "/api/space/folder-info?sortBy=name&direction=asc&limit=2&offset=2"))!.Files).Name);
+        var bySize = (await client.GetFromJsonAsync<FolderInfo>("/api/space/folder-info?sortBy=size&direction=desc"))!;
+        Assert.Equal(new[] { "a10.txt", "z.txt", "a2.txt" }, bySize.Files.Select(file => file.Name));
+        var byModified = (await client.GetFromJsonAsync<FolderInfo>("/api/space/folder-info?sortBy=lastModified&direction=desc"))!;
+        Assert.Equal(new[] { "a2.txt", "z.txt", "a10.txt" }, byModified.Files.Select(file => file.Name));
+        var byCreated = (await client.GetFromJsonAsync<FolderInfo>("/api/space/folder-info?sortBy=createdAt&direction=asc"))!;
+        Assert.True(byCreated.Files.Zip(byCreated.Files.Skip(1)).All(pair => pair.First.CreatedAt <= pair.Second.CreatedAt));
+
+        foreach (var options in new[] { "limit=51", "offset=-1", "sortBy=unknown", "direction=sideways" })
+            Assert.Equal(HttpStatusCode.BadRequest, (await client.GetAsync("/api/space/folder-info?" + options)).StatusCode);
+    }
+
+    [Fact]
     public async Task FolderListingIncludesCreationTimesForFilesAndFolders()
     {
         await using var app = new TestApplication();

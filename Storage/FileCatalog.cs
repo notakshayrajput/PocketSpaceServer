@@ -28,19 +28,25 @@ public sealed class FileCatalog(ApplicationDbContext db, UserStorage storage, Ti
     // Import existing disk files without moving them; browsing also discovers externally added files.
     public async Task<List<FileRecord>> IndexAsync(ClaimsPrincipal user, IEnumerable<string> paths)
     {
-        var records = await Active(user).ToListAsync();
-        var byPath = records.ToDictionary(f => f.PathKey);
-        var result = new List<FileRecord>();
-        foreach (var fullPath in paths)
+        var pathsToIndex = paths.Select(fullPath => new
         {
-            var relative = Relative(user, fullPath);
-            var key = Key(relative);
-            if (!byPath.TryGetValue(key, out var record))
+            FullPath = fullPath,
+            RelativePath = Relative(user, fullPath)
+        }).Select(path => new { path.FullPath, path.RelativePath, PathKey = Key(path.RelativePath) }).ToArray();
+        var byPath = new Dictionary<string, FileRecord>();
+        // Folder paging only needs metadata for the returned paths, not every file the user owns.
+        foreach (var keys in pathsToIndex.Select(path => path.PathKey).Distinct().Chunk(500))
+            foreach (var record in await Active(user).Where(file => keys.Contains(file.PathKey)).ToListAsync())
+                byPath.Add(record.PathKey, record);
+        var result = new List<FileRecord>();
+        foreach (var path in pathsToIndex)
+        {
+            if (!byPath.TryGetValue(path.PathKey, out var record))
             {
-                record = new FileRecord { UserId = Owner(user), RelativePath = relative, PathKey = key,
-                    IsFolder = Directory.Exists(fullPath), RecentAt = File.GetLastWriteTimeUtc(fullPath) };
+                record = new FileRecord { UserId = Owner(user), RelativePath = path.RelativePath, PathKey = path.PathKey,
+                    IsFolder = Directory.Exists(path.FullPath), RecentAt = File.GetLastWriteTimeUtc(path.FullPath) };
                 db.Files.Add(record);
-                byPath.Add(key, record);
+                byPath.Add(path.PathKey, record);
             }
             result.Add(record);
         }

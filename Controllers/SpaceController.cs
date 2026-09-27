@@ -30,17 +30,33 @@ public class SpaceController(UserStorage storage, FileCatalog catalog, QuotaUsag
     }
 
     [HttpGet("folder-info")]
-    public async Task<ActionResult<FolderInfo>> ListDirectoryContents([FromQuery] string relativePath = "")
+    public async Task<ActionResult<FolderInfo>> ListDirectoryContents(
+        [FromQuery] string relativePath = "", [FromQuery] string search = "",
+        [FromQuery] string sortBy = "createdAt", [FromQuery] string direction = "desc",
+        [FromQuery] int offset = 0, [FromQuery] int limit = 50)
     {
+        if (offset < 0 || limit is < 1 or > 50 || (search?.Length ?? 0) > 200 ||
+            sortBy is not ("name" or "size" or "lastModified" or "createdAt") ||
+            direction is not ("asc" or "desc"))
+            return BadRequest(new { message = "Invalid folder listing options." });
         var root = storage.Root(User);
         var path = storage.Resolve(User, relativePath);
         if (!Directory.Exists(path)) return NotFound(new { message = "Folder not found." });
+        var matching = UserStorage.Entries(path)
+            .Where(entry => FolderListing.MatchesName(Path.GetFileName(entry), search))
+            .Select(FolderListing.Read).ToArray();
+        var pagePaths = FolderListing.Sort(matching, sortBy, direction)
+            .Skip(offset).Take(limit).Select(entry => entry.Path).ToArray();
+        var files = (await catalog.IndexAsync(User, pagePaths)).Select(entry => catalog.Describe(User, entry)).ToArray();
         return Ok(new FolderInfo
         {
             Name = path == root ? "My files" : Path.GetFileName(path),
             LastModified = Directory.GetLastWriteTimeUtc(path),
             RelativePath = Path.GetRelativePath(root, path).Replace('\\', '/'),
-            Files = (await catalog.IndexAsync(User, UserStorage.Entries(path))).Select(entry => catalog.Describe(User, entry)).ToArray()
+            Files = files,
+            TotalCount = matching.Length,
+            NextOffset = offset + files.Length,
+            HasMore = offset + files.Length < matching.Length
         });
     }
 

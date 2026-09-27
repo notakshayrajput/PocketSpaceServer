@@ -13,7 +13,10 @@
         public string Name { get; set; } = null!;
         public DateTime LastModified { get; set; }
         public string RelativePath { get; set; } = null!;
-        public FileSystemEntry[] Files { get; set; }
+        public FileSystemEntry[] Files { get; set; } = [];
+        public int TotalCount { get; set; }
+        public int NextOffset { get; set; }
+        public bool HasMore { get; set; }
     }
     public class FileSystemEntry
     {
