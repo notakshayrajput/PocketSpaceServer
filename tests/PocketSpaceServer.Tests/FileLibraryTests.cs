@@ -325,6 +325,60 @@ public class FileLibraryTests
     }
 
     [Fact]
+    public async Task PermanentTrashDeletionFreesQuotaAndRemovesFileMetadata()
+    {
+        await using var app = new TestApplication();
+        using var client = app.CreateClient();
+        var user = await SignIn(client, "alice");
+        await Upload(client, "unused.txt", "four");
+        (await client.DeleteAsync("/api/space/entry?path=unused.txt")).EnsureSuccessStatusCode();
+        var item = Assert.Single(await Trash(client));
+        Assert.Equal(4, (await client.GetFromJsonAsync<DriveStats>("/api/space/drive-stats"))!.OccupiedSpace);
+
+        using var deleted = await client.DeleteAsync($"/api/space/trash/{item.Id}");
+        Assert.Equal(HttpStatusCode.NoContent, deleted.StatusCode);
+        Assert.Empty(await Trash(client));
+        Assert.Equal(0, (await client.GetFromJsonAsync<DriveStats>("/api/space/drive-stats"))!.OccupiedSpace);
+        Assert.Equal(HttpStatusCode.NotFound, (await client.DeleteAsync($"/api/space/trash/{item.Id}")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await client.PostAsJsonAsync($"/api/space/trash/{item.Id}/restore", new { })).StatusCode);
+        using var scope = app.Services.CreateScope();
+        var storage = scope.ServiceProvider.GetRequiredService<UserStorage>();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        Assert.False(File.Exists(storage.TrashPath(Principal(user), item.Id)));
+        Assert.False(await db.TrashEntries.AnyAsync(entry => entry.Id == item.Id));
+        Assert.False(await db.Files.AnyAsync(file => file.TrashEntryId == item.Id));
+    }
+
+    [Fact]
+    public async Task PermanentTrashDeletionRemovesFoldersAndIsPrivateEvenFromAdmin()
+    {
+        await using var app = new TestApplication();
+        using var alice = app.CreateClient();
+        using var bob = app.CreateClient();
+        using var admin = app.CreateClient();
+        var user = await SignIn(alice, "alice");
+        await SignIn(bob, "bob");
+        await SignIn(admin);
+        (await alice.PostAsJsonAsync("/api/space/folders", new { parentPath = ".", name = "folder" })).EnsureSuccessStatusCode();
+        await Upload(alice, "nested.txt", "nested", "folder");
+        (await alice.DeleteAsync("/api/space/entry?path=folder")).EnsureSuccessStatusCode();
+        var item = Assert.Single(await Trash(alice));
+        foreach (var other in new[] { bob, admin })
+        {
+            using var denied = await other.DeleteAsync($"/api/space/trash/{item.Id}");
+            Assert.Equal(HttpStatusCode.NotFound, denied.StatusCode);
+        }
+        using var scope = app.Services.CreateScope();
+        var storage = scope.ServiceProvider.GetRequiredService<UserStorage>();
+        Assert.True(File.Exists(Path.Combine(storage.TrashPath(Principal(user), item.Id), "nested.txt")));
+
+        using var deleted = await alice.DeleteAsync($"/api/space/trash/{item.Id}");
+        Assert.Equal(HttpStatusCode.NoContent, deleted.StatusCode);
+        Assert.False(Directory.Exists(storage.TrashPath(Principal(user), item.Id)));
+        Assert.Equal(0, (await alice.GetFromJsonAsync<DriveStats>("/api/space/drive-stats"))!.OccupiedSpace);
+    }
+
+    [Fact]
     public async Task FavoritesTrashAndRestoreArePrivateEvenFromAdministrator()
     {
         await using var app = new TestApplication();

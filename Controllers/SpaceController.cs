@@ -119,6 +119,10 @@ public class SpaceController(UserStorage storage, FileCatalog catalog, QuotaUsag
         RestoreResult.ParentMissing => Conflict(new { message = "The original folder is missing. Restore or recreate the parent folder first." }),
         _ => Conflict(new { message = "An item already exists at the original location. Rename or move it to Trash before restoring this item." })
     };
+
+    [HttpDelete("trash/{id}")]
+    public async Task<IActionResult> Purge(string id) =>
+        await catalog.PurgeAsync(User, id) ? NoContent() : NotFound(new { message = "Trash item not found." });
 }
 
 public sealed record CreateFolderRequest(string ParentPath, string Name);

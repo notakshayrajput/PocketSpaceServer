@@ -135,6 +135,17 @@ public sealed class FileCatalog(ApplicationDbContext db, UserStorage storage, Ti
 
     public Task<long> TrashSizeAsync(ClaimsPrincipal user) => db.TrashEntries.Where(t => t.UserId == Owner(user)).SumAsync(t => t.Size);
 
+    public async Task<bool> PurgeAsync(ClaimsPrincipal user, string id)
+    {
+        var entry = await db.TrashEntries.SingleOrDefaultAsync(t => t.UserId == Owner(user) && t.Id == id);
+        if (entry is null || entry.State is not (TrashState.Trashed or TrashState.Purging)) return false;
+        entry.State = TrashState.Purging;
+        // Save intent first so background cleanup can finish if deleting bytes fails.
+        await db.SaveChangesAsync();
+        await FinishAsync(user, entry);
+        return true;
+    }
+
     public async Task<RestoreResult> RestoreAsync(ClaimsPrincipal user, string id)
     {
         var entry = await db.TrashEntries.SingleOrDefaultAsync(t => t.UserId == Owner(user) && t.Id == id);
