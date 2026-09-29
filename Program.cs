@@ -1,6 +1,3 @@
-using System.Net.WebSockets;
-using System.Text;
-using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Identity;
@@ -12,6 +9,9 @@ using PocketSpaceServer.Authentication;
 using PocketSpaceServer.Data;
 using PocketSpaceServer.Models;
 using PocketSpaceServer.Storage;
+using System.Net.WebSockets;
+using System.Text;
+using System.Threading.RateLimiting;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -40,6 +40,7 @@ builder.Services.AddScoped<TrashCleanup>();
 builder.Services.AddHostedService<TrashCleanupWorker>();
 builder.Services.AddScoped<PendingAccountCleanup>();
 builder.Services.AddHostedService<PendingAccountCleanupWorker>();
+builder.Services.AddHealthChecks();
 
 var jwt = JwtSettings.Load(builder.Configuration, builder.Environment, dataDirectory);
 builder.Services.AddSingleton(jwt);
@@ -49,12 +50,17 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJw
     options.MapInboundClaims = false;
     options.TokenValidationParameters = new TokenValidationParameters
     {
-        ValidateIssuer = true, ValidIssuer = jwt.Issuer,
-        ValidateAudience = true, ValidAudience = jwt.Audience,
-        ValidateIssuerSigningKey = true, IssuerSigningKey = jwt.Key,
-        ValidateLifetime = true, ClockSkew = TimeSpan.Zero,
+        ValidateIssuer = true,
+        ValidIssuer = jwt.Issuer,
+        ValidateAudience = true,
+        ValidAudience = jwt.Audience,
+        ValidateIssuerSigningKey = true,
+        IssuerSigningKey = jwt.Key,
+        ValidateLifetime = true,
+        ClockSkew = TimeSpan.Zero,
         ValidAlgorithms = new[] { SecurityAlgorithms.HmacSha256 },
-        NameClaimType = "name", RoleClaimType = "role"
+        NameClaimType = "name",
+        RoleClaimType = "role"
     };
     options.Events = new JwtBearerEvents
     {
@@ -91,7 +97,9 @@ builder.Services.AddRateLimiter(options =>
         context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
         _ => new FixedWindowRateLimiterOptions
         {
-            PermitLimit = 20, Window = TimeSpan.FromMinutes(1), QueueLimit = 0
+            PermitLimit = 20,
+            Window = TimeSpan.FromMinutes(1),
+            QueueLimit = 0
         }));
 });
 
@@ -123,12 +131,17 @@ builder.Services.AddSwaggerGen(options =>
 {
     options.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
     {
-        Type = SecuritySchemeType.Http, Scheme = "bearer", BearerFormat = "JWT"
+        Type = SecuritySchemeType.Http,
+        Scheme = "bearer",
+        BearerFormat = "JWT"
     });
     options.AddSecurityRequirement(new OpenApiSecurityRequirement
     {
-        [new OpenApiSecurityScheme { Reference = new OpenApiReference
-            { Type = ReferenceType.SecurityScheme, Id = "Bearer" } }] = Array.Empty<string>()
+        [new OpenApiSecurityScheme
+        {
+            Reference = new OpenApiReference
+            { Type = ReferenceType.SecurityScheme, Id = "Bearer" }
+        }] = Array.Empty<string>()
     });
 });
 
@@ -143,12 +156,12 @@ if (app.Environment.IsDevelopment())
 }
 
 app.UseCors("AllowViteFrontend");
+app.UseHealthChecks("/healthz");
 app.UseWebSockets();
 app.UseAuthentication();
 app.UseAuthorization();
 app.UseRateLimiter();
 app.UseMiddleware<AccountStorageMiddleware>();
-
 app.Map("/ws", async context =>
 {
     if (!context.WebSockets.IsWebSocketRequest)
