@@ -169,11 +169,11 @@ internal sealed class TestApplication : WebApplicationFactory<Program>
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
-        builder.UseEnvironment("Development");
+        builder.UseEnvironment("Testing");
         builder.ConfigureLogging(logging => logging.ClearProviders().AddConsole());
         builder.UseSetting("ConnectionStrings:PocketSpace", $"Data Source={Path.Combine(directory, "test.db")}");
         builder.UseSetting("Jwt:SigningKey", "test-only-signing-key-which-is-at-least-32-bytes-long");
-        builder.UseSetting("PocketSpace:DirectorySettings:TargetDirectory", Path.Combine(directory, "files"));
+        builder.UseSetting("PocketSpace:Storage:FileSystemPath", Path.Combine(directory, "files"));
         builder.UseSetting("Logging:LogLevel:Default", "Warning");
         builder.ConfigureServices(services => services.AddSingleton<TimeProvider>(Clock));
     }

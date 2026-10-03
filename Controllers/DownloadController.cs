@@ -8,18 +8,20 @@ namespace PocketSpaceServer.Controllers;
 [ApiController]
 [Route("api/download")]
 [StorageErrors]
-public class DownloadController(UserStorage storage, FileCatalog catalog) : ControllerBase
+public class DownloadController(UserStorage storage, StorageManager stores, FileCatalog catalog) : ControllerBase
 {
     [HttpPost]
     public async Task<IActionResult> StreamZip(DownloadRequest request)
     {
         if (request.Paths.Length == 0) return BadRequest(new { message = "No paths specified." });
+        var backend = await stores.CurrentAsync();
         var paths = request.Paths.Select(path => storage.Resolve(User, path)).Distinct().ToArray();
-        if (paths.Any(path => !System.IO.File.Exists(path) && !Directory.Exists(path)))
+        var items = await Task.WhenAll(paths.Select(path => backend.StatAsync(path)));
+        if (items.Any(item => item is null))
             return NotFound(new { message = "File or folder not found." });
         await catalog.TouchAsync(User, paths);
-        if (paths.Length == 1 && System.IO.File.Exists(paths[0]))
-            return PhysicalFile(paths[0], "application/octet-stream", Path.GetFileName(paths[0]));
+        if (paths.Length == 1 && items[0]?.IsFolder == false)
+            return File(await backend.ReadAsync(paths[0], HttpContext.RequestAborted), "application/octet-stream", items[0]!.Name);
 
         var root = storage.Root(User);
         // ZipArchive writes its directory synchronously on disposal. Use an automatically
@@ -34,13 +36,14 @@ public class DownloadController(UserStorage storage, FileCatalog catalog) : Cont
                 foreach (var path in paths)
                 {
                     HttpContext.RequestAborted.ThrowIfCancellationRequested();
-                    if (System.IO.File.Exists(path)) await AddFile(archive, path, Path.GetFileName(path));
+                    var item = items[Array.IndexOf(paths, path)]!;
+                    if (!item.IsFolder) await AddFile(backend, archive, path, item.Name);
                     else
                     {
-                        var folderName = path == root ? "files" : Path.GetFileName(path);
+                        var folderName = path == root ? "files" : item.Name;
                         archive.CreateEntry(folderName + "/");
-                        foreach (var file in UserStorage.FilesRecursively(path))
-                            await AddFile(archive, file, folderName + "/" + Path.GetRelativePath(path, file).Replace('\\', '/'));
+                        foreach (var file in (await backend.TreeAsync(path, HttpContext.RequestAborted)).Where(child => !child.IsFolder))
+                            await AddFile(backend, archive, file.Path, folderName + "/" + Path.GetRelativePath(path, file.Path).Replace('\\', '/'));
                     }
                 }
             }
@@ -54,9 +57,9 @@ public class DownloadController(UserStorage storage, FileCatalog catalog) : Cont
         }
     }
 
-    private async Task AddFile(ZipArchive archive, string path, string name)
+    private async Task AddFile(IStorageBackend backend, ZipArchive archive, string path, string name)
     {
-        await using var source = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 81920, FileOptions.Asynchronous);
+        await using var source = await backend.ReadAsync(path, HttpContext.RequestAborted);
         await using var entry = archive.CreateEntry(name).Open();
         await source.CopyToAsync(entry, HttpContext.RequestAborted);
     }

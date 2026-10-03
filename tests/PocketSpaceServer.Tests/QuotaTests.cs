@@ -12,6 +12,39 @@ namespace PocketSpaceServer.Tests;
 public class QuotaTests
 {
     [Fact]
+    public async Task GlobalLimitAppliesAcrossAccountsAndCountsTrash()
+    {
+        await using var app = new TestApplication();
+        using var alice = app.CreateClient();
+        await Signup(alice);
+        using var admin = await Admin(app);
+        using var denied = await alice.GetAsync("/api/admin/storage-settings");
+        Assert.Equal(HttpStatusCode.Forbidden, denied.StatusCode);
+
+        using var configured = await admin.PutAsJsonAsync("/api/admin/storage-settings",
+            new { globalLimitBytes = 5L });
+        Assert.Equal(HttpStatusCode.NoContent, configured.StatusCode);
+        using var first = await Upload(alice, "alice.txt", "four");
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+        using var blocked = await Upload(admin, "admin.txt", "to");
+        Assert.Equal(HttpStatusCode.RequestEntityTooLarge, blocked.StatusCode);
+
+        using var smaller = await Upload(alice, "alice.txt", "tri");
+        Assert.Equal(HttpStatusCode.OK, smaller.StatusCode);
+        using var accepted = await Upload(admin, "admin.txt", "to");
+        Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
+        using var trashed = await alice.DeleteAsync("/api/space/entry?path=alice.txt");
+        Assert.Equal(HttpStatusCode.NoContent, trashed.StatusCode);
+        using var stillBlocked = await Upload(admin, "another.txt", "x");
+        Assert.Equal(HttpStatusCode.RequestEntityTooLarge, stillBlocked.StatusCode);
+
+        var stats = (await admin.GetFromJsonAsync<DriveStats>("/api/space/drive-stats"))!;
+        Assert.Equal("FileSystem", stats.Backend);
+        Assert.Equal(5, stats.GlobalUsedBytes);
+        Assert.Equal(5, stats.GlobalLimitBytes);
+    }
+
+    [Fact]
     public async Task DefaultQuotaIsVisibleAndOnlyAdminCanIncreaseIt()
     {
         await using var app = new TestApplication();
@@ -36,6 +69,29 @@ public class QuotaTests
         Assert.Equal(HttpStatusCode.NoContent, changed.StatusCode);
         Assert.Equal(600 * UserQuota.Megabyte,
             (await alice.GetFromJsonAsync<DriveStats>("/api/space/drive-stats"))!.QuotaBytes);
+    }
+
+    [Fact]
+    public async Task RawStreamingUploadEnforcesQuotaAndPreservesRejectedReplacement()
+    {
+        await using var app = new TestApplication();
+        using var alice = app.CreateClient();
+        var account = await Signup(alice);
+        using (var scope = app.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            await db.Users.Where(user => user.Id == account.User.Id)
+                .ExecuteUpdateAsync(update => update.SetProperty(user => user.QuotaBytes, 5L));
+        }
+
+        using var accepted = await alice.PostAsync("/api/upload/stream?name=file.txt",
+            new ByteArrayContent("four"u8.ToArray()));
+        Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
+        using var rejected = await alice.PostAsync("/api/upload/stream?name=file.txt",
+            new ByteArrayContent("too long"u8.ToArray()));
+        Assert.Equal(HttpStatusCode.RequestEntityTooLarge, rejected.StatusCode);
+        using var downloaded = await alice.PostAsJsonAsync("/api/download", new { paths = new[] { "file.txt" } });
+        Assert.Equal("four", await downloaded.Content.ReadAsStringAsync());
     }
 
     [Fact]

@@ -4,6 +4,7 @@ public sealed class FileRecord
 {
     public string Id { get; set; } = Guid.NewGuid().ToString("N");
     public string UserId { get; set; } = null!;
+    public string Backend { get; set; } = "FileSystem";
     public string RelativePath { get; set; } = null!;
     public string PathKey { get; set; } = null!;
     public bool IsFolder { get; set; }
@@ -16,6 +17,7 @@ public sealed class TrashEntry
 {
     public string Id { get; set; } = Guid.NewGuid().ToString("N");
     public string UserId { get; set; } = null!;
+    public string Backend { get; set; } = "FileSystem";
     public string OriginalPath { get; set; } = null!;
     public bool IsFolder { get; set; }
     public long Size { get; set; }

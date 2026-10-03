@@ -5,48 +5,36 @@ using PocketSpaceServer.Models;
 
 namespace PocketSpaceServer.Storage;
 
-// Callers hold the account operation lock for the entire filesystem/database operation.
-public sealed class FileCatalog(ApplicationDbContext db, UserStorage storage, TimeProvider clock)
+// File mutations hold the account operation lock; listings can run alongside uploads.
+public sealed class FileCatalog(ApplicationDbContext db, UserStorage paths, StorageManager stores, TimeProvider clock)
 {
     private DateTime Now => clock.GetUtcNow().UtcDateTime;
     private static string Owner(ClaimsPrincipal user) => user.FindFirst("sub")!.Value;
-    private static string Key(string path) => OperatingSystem.IsWindows() ? path.ToUpperInvariant() : path;
-    private string Relative(ClaimsPrincipal user, string fullPath) => Path.GetRelativePath(storage.Root(user), fullPath).Replace('\\', '/');
-    private static bool Exists(string path) => File.Exists(path) || Directory.Exists(path);
-    private IQueryable<FileRecord> Active(ClaimsPrincipal user) => db.Files.Where(f => f.UserId == Owner(user) && f.TrashEntryId == null);
+    private static string Key(string path, string backend) => backend == "FileSystem" && OperatingSystem.IsWindows()
+        ? path.ToUpperInvariant() : path;
+    private string Relative(ClaimsPrincipal user, string path) => Path.GetRelativePath(paths.Root(user), path).Replace('\\', '/');
+    private IQueryable<FileRecord> Active(ClaimsPrincipal user, string backend) => db.Files
+        .Where(f => f.UserId == Owner(user) && f.Backend == backend && f.TrashEntryId == null);
 
-    private static IEnumerable<string> Tree(string directory)
+    public async Task<List<FileRecord>> IndexAsync(ClaimsPrincipal user, IEnumerable<StorageItem> items)
     {
-        foreach (var path in UserStorage.Entries(directory))
-        {
-            yield return path;
-            if (Directory.Exists(path))
-                foreach (var child in Tree(path)) yield return child;
-        }
-    }
-
-    // Import existing disk files without moving them; browsing also discovers externally added files.
-    public async Task<List<FileRecord>> IndexAsync(ClaimsPrincipal user, IEnumerable<string> paths)
-    {
-        var pathsToIndex = paths.Select(fullPath => new
-        {
-            FullPath = fullPath,
-            RelativePath = Relative(user, fullPath)
-        }).Select(path => new { path.FullPath, path.RelativePath, PathKey = Key(path.RelativePath) }).ToArray();
+        var backend = await stores.CurrentAsync();
+        var selected = items.Select(item => new { Item = item, RelativePath = Relative(user, item.Path) })
+            .Select(item => new { item.Item, item.RelativePath, PathKey = Key(item.RelativePath, backend.Kind) }).ToArray();
         var byPath = new Dictionary<string, FileRecord>();
-        // Folder paging only needs metadata for the returned paths, not every file the user owns.
-        foreach (var keys in pathsToIndex.Select(path => path.PathKey).Distinct().Chunk(500))
-            foreach (var record in await Active(user).Where(file => keys.Contains(file.PathKey)).ToListAsync())
+        foreach (var keys in selected.Select(item => item.PathKey).Distinct().Chunk(500))
+            foreach (var record in await Active(user, backend.Kind).Where(file => keys.Contains(file.PathKey)).ToListAsync())
                 byPath.Add(record.PathKey, record);
         var result = new List<FileRecord>();
-        foreach (var path in pathsToIndex)
+        foreach (var item in selected)
         {
-            if (!byPath.TryGetValue(path.PathKey, out var record))
+            if (!byPath.TryGetValue(item.PathKey, out var record))
             {
-                record = new FileRecord { UserId = Owner(user), RelativePath = path.RelativePath, PathKey = path.PathKey,
-                    IsFolder = Directory.Exists(path.FullPath), RecentAt = File.GetLastWriteTimeUtc(path.FullPath) };
+                record = new FileRecord { UserId = Owner(user), Backend = backend.Kind,
+                    RelativePath = item.RelativePath, PathKey = item.PathKey,
+                    IsFolder = item.Item.IsFolder, RecentAt = item.Item.LastModified };
                 db.Files.Add(record);
-                byPath.Add(path.PathKey, record);
+                byPath.Add(item.PathKey, record);
             }
             result.Add(record);
         }
@@ -54,52 +42,76 @@ public sealed class FileCatalog(ApplicationDbContext db, UserStorage storage, Ti
         return result;
     }
 
-    public FileSystemEntry Describe(ClaimsPrincipal user, FileRecord record)
+    public async Task<FileSystemEntry> DescribeAsync(ClaimsPrincipal user, FileRecord record)
     {
-        var path = storage.Resolve(user, record.RelativePath);
-        return new FileSystemEntry { Id = record.Id, Name = Path.GetFileName(path), RelativePath = record.RelativePath,
+        var backend = await stores.ForKindAsync(record.Backend);
+        var item = await backend.StatAsync(paths.Resolve(user, record.RelativePath))
+            ?? throw new FileNotFoundException();
+        return Describe(record, item);
+    }
+
+    public static FileSystemEntry Describe(FileRecord record, StorageItem item)
+    {
+        return new FileSystemEntry { Id = record.Id, Name = item.Name, RelativePath = record.RelativePath,
             IsFolder = record.IsFolder, IsFavorite = record.IsFavorite, RecentAt = record.RecentAt,
-            LastModified = record.IsFolder ? Directory.GetLastWriteTimeUtc(path) : File.GetLastWriteTimeUtc(path),
-            CreatedAt = record.IsFolder ? Directory.GetCreationTimeUtc(path) : File.GetCreationTimeUtc(path),
-            Size = record.IsFolder ? 0 : new FileInfo(path).Length };
+            LastModified = item.LastModified, CreatedAt = item.CreatedAt, Size = item.Size };
     }
 
     public async Task<HomeFiles> HomeAsync(ClaimsPrincipal user)
     {
-        var records = await IndexAsync(user, Tree(storage.Root(user)));
-        var files = records.Where(f => !f.IsFolder).ToArray();
-        return new HomeFiles(
-            files.Where(f => f.IsFavorite).OrderBy(f => f.RelativePath, StringComparer.OrdinalIgnoreCase).Select(f => Describe(user, f)).ToArray(),
-            files.OrderByDescending(f => f.RecentAt).ThenBy(f => f.RelativePath).Take(20).Select(f => Describe(user, f)).ToArray());
+        var backend = await stores.CurrentAsync();
+        var items = backend is S3StorageBackend s3
+            ? await s3.ActiveFilesAsync(paths.Root(user))
+            : (await backend.TreeAsync(paths.Root(user))).Where(item => !item.IsFolder).ToArray();
+        var files = await IndexAsync(user, items);
+        var byPath = items.ToDictionary(item => Relative(user, item.Path));
+        var favorites = new List<FileSystemEntry>();
+        foreach (var file in files.Where(f => f.IsFavorite).OrderBy(f => f.RelativePath, StringComparer.OrdinalIgnoreCase))
+            favorites.Add(Describe(file, byPath[file.RelativePath]));
+        var recent = new List<FileSystemEntry>();
+        foreach (var file in files.OrderByDescending(f => f.RecentAt).ThenBy(f => f.RelativePath).Take(20))
+            recent.Add(Describe(file, byPath[file.RelativePath]));
+        return new HomeFiles(favorites.ToArray(), recent.ToArray());
     }
 
     public async Task<bool> FavoriteAsync(ClaimsPrincipal user, string id, bool favorite)
     {
-        var file = await Active(user).SingleOrDefaultAsync(f => f.Id == id && !f.IsFolder);
-        if (file is null || !File.Exists(storage.Resolve(user, file.RelativePath))) return false;
+        var backend = await stores.CurrentAsync();
+        var file = await Active(user, backend.Kind).SingleOrDefaultAsync(f => f.Id == id && !f.IsFolder);
+        if (file is null || await backend.StatAsync(paths.Resolve(user, file.RelativePath)) is null) return false;
         file.IsFavorite = favorite;
         await db.SaveChangesAsync();
         return true;
     }
 
-    public async Task TouchAsync(ClaimsPrincipal user, IEnumerable<string> paths)
+    public async Task TouchAsync(ClaimsPrincipal user, IEnumerable<string> pathsToTouch)
     {
-        var files = paths.SelectMany(path => Directory.Exists(path) ? UserStorage.FilesRecursively(path) : new[] { path }).Distinct();
+        var backend = await stores.CurrentAsync();
+        var files = new List<StorageItem>();
+        foreach (var path in pathsToTouch.Distinct())
+        {
+            var item = await backend.StatAsync(path);
+            if (item is null) continue;
+            if (item.IsFolder) files.AddRange((await backend.TreeAsync(path)).Where(child => !child.IsFolder));
+            else files.Add(item);
+        }
         foreach (var record in await IndexAsync(user, files)) record.RecentAt = Now;
         await db.SaveChangesAsync();
     }
 
     public async Task RenameAsync(ClaimsPrincipal user, string source, string destination)
     {
-        await IndexAsync(user, Directory.Exists(source) ? Tree(source).Prepend(source) : new[] { source });
+        var backend = await stores.CurrentAsync();
+        var item = await backend.StatAsync(source) ?? throw new FileNotFoundException();
+        IEnumerable<StorageItem> tree = item.IsFolder ? (await backend.TreeAsync(source)).Prepend(item) : [item];
+        await IndexAsync(user, tree);
         var from = Relative(user, source);
         var to = Relative(user, destination);
-        var fromKey = Key(from);
-        var records = (await Active(user).ToListAsync()).Where(f => f.PathKey == fromKey || f.PathKey.StartsWith(fromKey + "/", StringComparison.Ordinal)).ToArray();
-        var isFolder = Directory.Exists(source);
-        // Clear stale metadata at the destination left by files removed outside PocketSpace.
-        var destinationKey = Key(to);
-        var stale = (await Active(user).ToListAsync()).Where(f => !records.Contains(f) &&
+        var fromKey = Key(from, backend.Kind);
+        var active = await Active(user, backend.Kind).ToListAsync();
+        var records = active.Where(f => f.PathKey == fromKey || f.PathKey.StartsWith(fromKey + "/", StringComparison.Ordinal)).ToArray();
+        var destinationKey = Key(to, backend.Kind);
+        var stale = active.Where(f => !records.Contains(f) &&
             (f.PathKey == destinationKey || f.PathKey.StartsWith(destinationKey + "/", StringComparison.Ordinal))).ToArray();
         await using var transaction = await db.Database.BeginTransactionAsync();
         db.Files.RemoveRange(stale);
@@ -107,40 +119,46 @@ public sealed class FileCatalog(ApplicationDbContext db, UserStorage storage, Ti
         foreach (var record in records)
         {
             record.RelativePath = to + record.RelativePath[from.Length..];
-            record.PathKey = Key(record.RelativePath);
+            record.PathKey = Key(record.RelativePath, backend.Kind);
             record.RecentAt = Now;
         }
         await db.SaveChangesAsync();
-        Move(source, destination, isFolder);
+        await backend.MoveAsync(source, destination, item.IsFolder);
         try { await transaction.CommitAsync(); }
-        catch { Move(destination, source, isFolder); throw; }
+        catch { await backend.MoveAsync(destination, source, item.IsFolder); throw; }
     }
 
     public async Task TrashAsync(ClaimsPrincipal user, string path)
     {
-        var records = await IndexAsync(user, Directory.Exists(path) ? Tree(path).Prepend(path) : new[] { path });
+        var backend = await stores.CurrentAsync();
+        var item = await backend.StatAsync(path) ?? throw new FileNotFoundException();
+        IEnumerable<StorageItem> tree = item.IsFolder ? (await backend.TreeAsync(path)).Prepend(item) : [item];
+        var records = await IndexAsync(user, tree);
         var now = Now;
-        var entry = new TrashEntry { UserId = Owner(user), OriginalPath = Relative(user, path), IsFolder = Directory.Exists(path),
-            Size = records.Where(f => !f.IsFolder).Sum(f => new FileInfo(storage.Resolve(user, f.RelativePath)).Length),
+        var entry = new TrashEntry { UserId = Owner(user), Backend = backend.Kind,
+            OriginalPath = Relative(user, path), IsFolder = item.IsFolder,
+            Size = tree.Where(child => !child.IsFolder).Sum(child => child.Size),
             TrashedAt = now, ExpiresAt = now.AddDays(7) };
         db.TrashEntries.Add(entry);
         foreach (var record in records) record.TrashEntryId = entry.Id;
-        // Save intent before moving bytes, so interrupted moves are recoverable.
         await db.SaveChangesAsync();
         await FinishAsync(user, entry);
     }
 
-    public Task<List<TrashEntry>> TrashListAsync(ClaimsPrincipal user) => db.TrashEntries
-        .Where(t => t.UserId == Owner(user) && t.State == TrashState.Trashed).OrderByDescending(t => t.TrashedAt).ToListAsync();
-
-    public Task<long> TrashSizeAsync(ClaimsPrincipal user) => db.TrashEntries.Where(t => t.UserId == Owner(user)).SumAsync(t => t.Size);
+    public async Task<List<TrashEntry>> TrashListAsync(ClaimsPrincipal user)
+    {
+        var backend = await stores.CurrentAsync();
+        return await db.TrashEntries.Where(t => t.UserId == Owner(user) && t.Backend == backend.Kind &&
+            t.State == TrashState.Trashed).OrderByDescending(t => t.TrashedAt).ToListAsync();
+    }
 
     public async Task<bool> PurgeAsync(ClaimsPrincipal user, string id)
     {
-        var entry = await db.TrashEntries.SingleOrDefaultAsync(t => t.UserId == Owner(user) && t.Id == id);
+        var backend = await stores.CurrentAsync();
+        var entry = await db.TrashEntries.SingleOrDefaultAsync(t => t.UserId == Owner(user) &&
+            t.Backend == backend.Kind && t.Id == id);
         if (entry is null || entry.State is not (TrashState.Trashed or TrashState.Purging)) return false;
         entry.State = TrashState.Purging;
-        // Save intent first so background cleanup can finish if deleting bytes fails.
         await db.SaveChangesAsync();
         await FinishAsync(user, entry);
         return true;
@@ -148,13 +166,15 @@ public sealed class FileCatalog(ApplicationDbContext db, UserStorage storage, Ti
 
     public async Task<RestoreResult> RestoreAsync(ClaimsPrincipal user, string id)
     {
-        var entry = await db.TrashEntries.SingleOrDefaultAsync(t => t.UserId == Owner(user) && t.Id == id);
+        var backend = await stores.CurrentAsync();
+        var entry = await db.TrashEntries.SingleOrDefaultAsync(t => t.UserId == Owner(user) &&
+            t.Backend == backend.Kind && t.Id == id);
         if (entry is null) return RestoreResult.Missing;
-        // The deadline is enforced even if the background cleanup hasn't run yet.
         if (entry.ExpiresAt <= Now || entry.State == TrashState.Purging) return RestoreResult.Expired;
-        var destination = storage.Resolve(user, entry.OriginalPath);
-        if (Exists(destination)) return RestoreResult.Conflict;
-        if (!Directory.Exists(Path.GetDirectoryName(destination))) return RestoreResult.ParentMissing;
+        var destination = paths.Resolve(user, entry.OriginalPath);
+        if (await backend.StatAsync(destination) is not null) return RestoreResult.Conflict;
+        if ((await backend.StatAsync(Path.GetDirectoryName(destination)!))?.IsFolder != true)
+            return RestoreResult.ParentMissing;
         entry.State = TrashState.Restoring;
         await db.SaveChangesAsync();
         await FinishAsync(user, entry);
@@ -163,7 +183,9 @@ public sealed class FileCatalog(ApplicationDbContext db, UserStorage storage, Ti
 
     public async Task RecoverAsync(ClaimsPrincipal user)
     {
+        var backend = await stores.CurrentAsync();
         foreach (var entry in await db.TrashEntries.Where(t => t.UserId == Owner(user) &&
+            t.Backend == backend.Kind &&
             (t.State == TrashState.Moving || t.State == TrashState.Restoring)).ToListAsync())
             await FinishAsync(user, entry);
     }
@@ -171,7 +193,8 @@ public sealed class FileCatalog(ApplicationDbContext db, UserStorage storage, Ti
     public async Task CleanupAsync(ClaimsPrincipal user, ILogger logger, CancellationToken cancellationToken)
     {
         var now = Now;
-        var entries = await db.TrashEntries.Where(t => t.UserId == Owner(user) && (t.ExpiresAt <= now || t.State != TrashState.Trashed)).ToListAsync(cancellationToken);
+        var entries = await db.TrashEntries.Where(t => t.UserId == Owner(user) &&
+            (t.ExpiresAt <= now || t.State != TrashState.Trashed)).ToListAsync(cancellationToken);
         foreach (var entry in entries)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -192,38 +215,39 @@ public sealed class FileCatalog(ApplicationDbContext db, UserStorage storage, Ti
 
     private async Task FinishAsync(ClaimsPrincipal user, TrashEntry entry)
     {
-        var trashPath = storage.TrashPath(user, entry.Id);
+        var backend = await stores.ForKindAsync(entry.Backend);
+        var trashPath = paths.TrashPath(user, entry.Id);
         if (entry.State == TrashState.Moving)
         {
-            var source = storage.Resolve(user, entry.OriginalPath);
-            if (!Exists(trashPath))
+            var source = paths.Resolve(user, entry.OriginalPath);
+            if (await backend.StatAsync(source) is not null)
             {
-                Directory.CreateDirectory(Path.GetDirectoryName(trashPath)!);
-                Move(source, trashPath, entry.IsFolder);
+                await backend.CreateDirectoryAsync(Path.GetDirectoryName(trashPath)!);
+                await backend.MoveAsync(source, trashPath, entry.IsFolder);
             }
+            if (await backend.StatAsync(trashPath) is null) throw new IOException("Trash item is unavailable.");
             entry.State = TrashState.Trashed;
             await db.SaveChangesAsync();
         }
         else if (entry.State == TrashState.Restoring)
         {
-            var destination = storage.Resolve(user, entry.OriginalPath);
-            if (Exists(trashPath))
+            var destination = paths.Resolve(user, entry.OriginalPath);
+            if (await backend.StatAsync(trashPath) is not null)
             {
-                // An external writer may create a conflicting file between attempts.
-                if (Exists(destination) || !Directory.Exists(Path.GetDirectoryName(destination)))
+                if (await backend.StatAsync(destination) is not null ||
+                    (await backend.StatAsync(Path.GetDirectoryName(destination)!))?.IsFolder != true)
                 {
                     entry.State = TrashState.Trashed;
                     await db.SaveChangesAsync();
                     throw new IOException("The original location is unavailable.");
                 }
-                Move(trashPath, destination, entry.IsFolder);
+                await backend.MoveAsync(trashPath, destination, entry.IsFolder);
             }
-            if (!Exists(destination)) throw new IOException("The restored file is unavailable.");
+            if (await backend.StatAsync(destination) is null) throw new IOException("The restored file is unavailable.");
             var records = await db.Files.Where(f => f.TrashEntryId == entry.Id).ToListAsync();
             var keys = records.Select(f => f.PathKey).ToArray();
             await using var transaction = await db.Database.BeginTransactionAsync();
-            // Metadata for externally removed/replaced files must not block restoration.
-            await Active(user).Where(f => keys.Contains(f.PathKey)).ExecuteDeleteAsync();
+            await Active(user, entry.Backend).Where(f => keys.Contains(f.PathKey)).ExecuteDeleteAsync();
             foreach (var record in records) { record.TrashEntryId = null; record.RecentAt = Now; }
             await db.SaveChangesAsync();
             db.TrashEntries.Remove(entry);
@@ -232,18 +256,10 @@ public sealed class FileCatalog(ApplicationDbContext db, UserStorage storage, Ti
         }
         else if (entry.State == TrashState.Purging)
         {
-            // This generated, validated path is always inside this user's private trash.
-            if (Directory.Exists(trashPath)) Directory.Delete(trashPath, recursive: true);
-            else if (File.Exists(trashPath)) File.Delete(trashPath);
+            await backend.DeleteAsync(trashPath, entry.IsFolder);
             db.TrashEntries.Remove(entry);
             await db.SaveChangesAsync();
         }
-    }
-
-    private static void Move(string source, string destination, bool isFolder)
-    {
-        if (isFolder) Directory.Move(source, destination);
-        else File.Move(source, destination);
     }
 }
 

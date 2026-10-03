@@ -5,7 +5,8 @@ using PocketSpaceServer.Storage;
 
 namespace PocketSpaceServer.Data;
 
-public sealed class PendingAccountCleanup(ApplicationDbContext db, UserStorage storage,
+public sealed class PendingAccountCleanup(ApplicationDbContext db, UserStorage storage, StorageManager stores,
+    StorageOptions storageOptions,
     AccountOperationLocks operations, TimeProvider clock, ILogger<PendingAccountCleanup> logger)
 {
     public async Task RunAsync(CancellationToken cancellationToken = default)
@@ -28,7 +29,9 @@ public sealed class PendingAccountCleanup(ApplicationDbContext db, UserStorage s
 
                 // The only deletion target is the generated GUID folder under the managed user root.
                 var folder = storage.UserRoot(id);
-                if (Directory.Exists(folder)) Directory.Delete(folder, recursive: true);
+                await (await stores.ForKindAsync("FileSystem")).DeleteAsync(folder, true, cancellationToken);
+                if (storageOptions.HasS3Credentials)
+                    await (await stores.ForKindAsync("S3")).DeleteAsync(folder, true, cancellationToken);
                 // Keep the Deleting record if storage cleanup fails, so the next run can retry.
                 await db.Users.Where(u => u.Id == id && u.Status == AccountStatus.Deleting)
                     .ExecuteDeleteAsync(cancellationToken);

@@ -13,6 +13,9 @@ public sealed class StorageErrorsAttribute : ExceptionFilterAttribute
             context.Result = new NotFoundObjectResult(new { message = "File or folder not found." });
         else if (context.Exception is IOException or UnauthorizedAccessException)
             context.Result = new ConflictObjectResult(new { message = "The file operation could not be completed. Try again." });
+        else if (context.Exception is Amazon.S3.AmazonS3Exception)
+            context.Result = new ObjectResult(new { message = "S3 storage is unavailable. Check the bucket and credentials." })
+            { StatusCode = StatusCodes.Status503ServiceUnavailable };
         else return;
         context.ExceptionHandled = true;
     }

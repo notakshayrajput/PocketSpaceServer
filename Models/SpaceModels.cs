@@ -3,6 +3,9 @@
     public class DriveStats
     {
         public required string Directory { get; set; }
+        public required string Backend { get; set; }
+        public long GlobalUsedBytes { get; set; }
+        public long? GlobalLimitBytes { get; set; }
         public long AvailableSpace { get; set; }
         public long TotalSpace { get; set; }
         public long OccupiedSpace { get; set; }

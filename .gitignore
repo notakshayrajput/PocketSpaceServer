@@ -35,6 +35,8 @@ msbuild.wrn
 
 # Local database and development signing key
 App_Data/
+StorageDirectory/
+.env
 *.db
 *.db-shm
 *.db-wal

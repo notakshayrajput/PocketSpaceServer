@@ -10,6 +10,7 @@ public class ApplicationDbContext(DbContextOptions<ApplicationDbContext> options
 {
     public DbSet<FileRecord> Files => Set<FileRecord>();
     public DbSet<TrashEntry> TrashEntries => Set<TrashEntry>();
+    public DbSet<StorageConfiguration> StorageConfigurations => Set<StorageConfiguration>();
 
     protected override void OnModelCreating(ModelBuilder builder)
     {
@@ -17,12 +18,13 @@ public class ApplicationDbContext(DbContextOptions<ApplicationDbContext> options
         builder.Entity<ApplicationUser>().Property(u => u.QuotaBytes).HasDefaultValue(UserQuota.DefaultBytes);
         builder.Entity<FileRecord>().HasOne<ApplicationUser>().WithMany().HasForeignKey(f => f.UserId).OnDelete(DeleteBehavior.Cascade);
         builder.Entity<FileRecord>().HasOne<TrashEntry>().WithMany().HasForeignKey(f => f.TrashEntryId).OnDelete(DeleteBehavior.Cascade);
-        builder.Entity<FileRecord>().HasIndex(f => new { f.UserId, f.PathKey }).IsUnique().HasFilter("\"TrashEntryId\" IS NULL");
+        builder.Entity<FileRecord>().HasIndex(f => new { f.Backend, f.UserId, f.PathKey }).IsUnique().HasFilter("\"TrashEntryId\" IS NULL");
         builder.Entity<FileRecord>().HasIndex(f => new { f.UserId, f.RecentAt });
         builder.Entity<FileRecord>().Property(f => f.RecentAt)
             .HasConversion(value => value, value => DateTime.SpecifyKind(value, DateTimeKind.Utc));
         builder.Entity<TrashEntry>().HasOne<ApplicationUser>().WithMany().HasForeignKey(t => t.UserId).OnDelete(DeleteBehavior.Cascade);
         builder.Entity<TrashEntry>().HasIndex(t => new { t.UserId, t.ExpiresAt });
+        builder.Entity<StorageConfiguration>().HasData(new StorageConfiguration());
         builder.Entity<TrashEntry>().Property(t => t.TrashedAt)
             .HasConversion(value => value, value => DateTime.SpecifyKind(value, DateTimeKind.Utc));
         builder.Entity<TrashEntry>().Property(t => t.ExpiresAt)

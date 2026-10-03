@@ -7,6 +7,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="AWSSDK.S3" Version="4.0.15" />
     <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="8.0.28" />
     <PackageReference Include="Microsoft.AspNetCore.Identity.EntityFrameworkCore" Version="8.0.28" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="8.0.28" />
@@ -18,8 +19,8 @@
 
   <ItemGroup>
     <Compile Remove="tests\**" />
-    <Content Remove="tests\**;App_Data\**" />
-    <None Remove="tests\**;App_Data\**" />
+    <Content Remove="tests\**;App_Data\**;StorageDirectory\**;.env" />
+    <None Remove="tests\**;App_Data\**;StorageDirectory\**;.env" />
   </ItemGroup>
 
 </Project>

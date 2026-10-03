@@ -15,6 +15,22 @@ using System.Threading.RateLimiting;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// Local development can use a git-ignored .env file; real environment variables win.
+if (builder.Environment.IsDevelopment())
+{
+    var envPath = Path.Combine(builder.Environment.ContentRootPath, ".env");
+    if (File.Exists(envPath))
+    {
+        using var envStream = File.OpenRead(envPath);
+        var localValues = new ConfigurationBuilder().AddIniStream(envStream).Build().AsEnumerable()
+            .Where(entry => entry.Value is not null)
+            .ToDictionary(entry => entry.Key.Replace("__", ":"), entry => entry.Value);
+        builder.Configuration.AddInMemoryCollection(localValues);
+        builder.Configuration.AddEnvironmentVariables();
+    }
+}
+var storageOptions = StorageOptions.Load(builder.Configuration, builder.Environment.ContentRootPath);
+
 // Add services to the container.
 
 builder.Services.AddControllers();
@@ -32,8 +48,15 @@ builder.Services.AddIdentityCore<ApplicationUser>(options =>
     options.Lockout.DefaultLockoutTimeSpan = TimeSpan.FromMinutes(5);
 }).AddRoles<IdentityRole>().AddEntityFrameworkStores<ApplicationDbContext>().AddDefaultTokenProviders();
 builder.Services.AddSingleton(TimeProvider.System);
+builder.Services.AddSingleton(storageOptions);
 builder.Services.AddSingleton<AccountOperationLocks>();
-builder.Services.AddScoped<UserStorage>();
+builder.Services.AddSingleton<UserStorage>();
+builder.Services.AddScoped<FileSystemBackend>();
+if (storageOptions.HasS3Credentials)
+    builder.Services.AddSingleton(sp => new S3StorageBackend(sp.GetRequiredService<UserStorage>(),
+        storageOptions.S3Bucket!, storageOptions.S3Region, storageOptions.S3AccessKey!, storageOptions.S3SecretKey!));
+builder.Services.AddScoped<StorageManager>();
+builder.Services.AddSingleton<GlobalStorageLock>();
 builder.Services.AddScoped<FileCatalog>();
 builder.Services.AddScoped<QuotaUsage>();
 builder.Services.AddScoped<TrashCleanup>();
@@ -123,8 +146,7 @@ builder.WebHost.ConfigureKestrel(options =>
     //options.Limits.MaxRequestBodySize
 });
 
-builder.Services.Configure<DirectorySettings>(
-    builder.Configuration.GetSection("PocketSpace:DirectorySettings"));
+builder.Services.Configure<DirectorySettings>(options => options.TargetDirectory = storageOptions.FileSystemPath);
 
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(options =>
@@ -210,15 +232,11 @@ app.Map("/ws", async context =>
     }
 }).RequireAuthorization();
 
-// Ensure TargetDirectory exists
+// Only local mode needs a directory on this host.
 using (var scope = app.Services.CreateScope())
 {
     var config = scope.ServiceProvider.GetRequiredService<IOptions<DirectorySettings>>().Value;
-    if (!Directory.Exists(config.TargetDirectory))
-    {
-        Directory.CreateDirectory(config.TargetDirectory);
-        Console.WriteLine($"Created directory: {config.TargetDirectory}");
-    }
+    if (storageOptions.Provider == "FileSystem") Directory.CreateDirectory(config.TargetDirectory);
 }
 
 // Vite proxies /api to the local HTTP endpoint during development. Production

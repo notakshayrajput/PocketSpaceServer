@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using PocketSpaceServer.Data;
 
@@ -10,9 +11,11 @@ using PocketSpaceServer.Data;
 namespace PocketSpaceServer.Data.Migrations
 {
     [DbContext(typeof(ApplicationDbContext))]
-    partial class ApplicationDbContextModelSnapshot : ModelSnapshot
+    [Migration("20261002090238_StorageBackends")]
+    partial class StorageBackends
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "8.0.28");
@@ -282,8 +285,24 @@ namespace PocketSpaceServer.Data.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("INTEGER");
 
+                    b.Property<string>("AccessKeyCiphertext")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Backend")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Bucket")
+                        .HasColumnType("TEXT");
+
                     b.Property<long?>("GlobalLimitBytes")
                         .HasColumnType("INTEGER");
+
+                    b.Property<string>("Region")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("SecretKeyCiphertext")
+                        .HasColumnType("TEXT");
 
                     b.HasKey("Id");
 
@@ -292,7 +311,8 @@ namespace PocketSpaceServer.Data.Migrations
                     b.HasData(
                         new
                         {
-                            Id = 1
+                            Id = 1,
+                            Backend = "FileSystem"
                         });
                 });
 

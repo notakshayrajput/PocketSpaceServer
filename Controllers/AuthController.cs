@@ -16,7 +16,7 @@ namespace PocketSpaceServer.Controllers;
 [Route("api/auth")]
 [ResponseCache(NoStore = true, Location = ResponseCacheLocation.None)]
 public class AuthController(UserManager<ApplicationUser> users, TokenService tokens, ApplicationDbContext db,
-    UserStorage storage, TimeProvider clock, AccountOperationLocks operations) : ControllerBase
+    UserStorage storage, StorageManager stores, TimeProvider clock, AccountOperationLocks operations) : ControllerBase
 {
     [HttpPost("signup")]
     [AllowAnonymous]
@@ -41,12 +41,13 @@ public class AuthController(UserManager<ApplicationUser> users, TokenService tok
         if (!result.Succeeded) throw new InvalidOperationException("Could not assign user role.");
 
         var folder = storage.UserRoot(user.Id);
-        Directory.CreateDirectory(folder);
+        var backend = await stores.CurrentAsync();
+        await backend.CreateDirectoryAsync(folder);
         try { await transaction.CommitAsync(); }
         catch
         {
             // No token has been issued yet and this newly allocated folder is empty.
-            Directory.Delete(folder);
+            await backend.DeleteAsync(folder, true);
             throw;
         }
         return StatusCode(StatusCodes.Status201Created, tokens.Create(user, new[] { "User" }));
