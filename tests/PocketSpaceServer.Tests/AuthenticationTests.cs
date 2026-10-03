@@ -145,11 +145,62 @@ public class AuthenticationTests
         authenticated.SubProtocols.Add("bearer." + login.AccessToken);
         using var socket = await authenticated.ConnectAsync(new Uri("ws://localhost/ws"), CancellationToken.None);
         Assert.Equal("pocketspace", socket.SubProtocol);
-        var buffer = new byte[128];
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        var message = await socket.ReceiveAsync(buffer, timeout.Token);
-        Assert.Equal("server-state:Idle", Encoding.UTF8.GetString(buffer, 0, message.Count));
         await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Test complete", timeout.Token);
+    }
+
+    [Fact]
+    public async Task AdminCanBlockAndUnblockUserWithoutDeletingFiles()
+    {
+        await using var app = new TestApplication();
+        using var admin = app.CreateClient();
+        var adminLogin = await Login(admin);
+        admin.DefaultRequestHeaders.Authorization = new("Bearer", adminLogin.AccessToken);
+        using var user = app.CreateClient();
+        using var signup = await user.PostAsJsonAsync("/api/auth/signup",
+            new { username = "blocked-user", password = "password@123" });
+        Assert.Equal(HttpStatusCode.Created, signup.StatusCode);
+        var userLogin = (await signup.Content.ReadFromJsonAsync<LoginResponse>())!;
+        user.DefaultRequestHeaders.Authorization = new("Bearer", userLogin.AccessToken);
+        using var form = new MultipartFormDataContent();
+        form.Add(new StringContent("."), "DestinationPath");
+        form.Add(new ByteArrayContent(Encoding.UTF8.GetBytes("keep me")), "Files", "keep.txt");
+        using var upload = await user.PostAsync("/api/upload", form);
+        Assert.Equal(HttpStatusCode.OK, upload.StatusCode);
+
+        using var nonAdminBlock = await user.PutAsJsonAsync($"/api/admin/users/{userLogin.User.Id}/block",
+            new { isBlocked = true });
+        Assert.Equal(HttpStatusCode.Forbidden, nonAdminBlock.StatusCode);
+        using var selfBlock = await admin.PutAsJsonAsync($"/api/admin/users/{adminLogin.User.Id}/block",
+            new { isBlocked = true });
+        Assert.Equal(HttpStatusCode.Conflict, selfBlock.StatusCode);
+        using var block = await admin.PutAsJsonAsync($"/api/admin/users/{userLogin.User.Id}/block",
+            new { isBlocked = true });
+        Assert.Equal(HttpStatusCode.NoContent, block.StatusCode);
+        using var list = await admin.GetAsync("/api/admin/users");
+        list.EnsureSuccessStatusCode();
+        Assert.Contains("\"isBlocked\":true", await list.Content.ReadAsStringAsync());
+        using var me = await user.GetAsync("/api/auth/me");
+        Assert.Equal(HttpStatusCode.Unauthorized, me.StatusCode);
+        using var files = await user.GetAsync("/api/space/folder-info");
+        Assert.Equal(HttpStatusCode.Unauthorized, files.StatusCode);
+        using var anonymous = app.CreateClient();
+        using var deniedLogin = await anonymous.PostAsJsonAsync("/api/auth/login",
+            new { username = "blocked-user", password = "password@123" });
+        Assert.Equal(HttpStatusCode.Unauthorized, deniedLogin.StatusCode);
+
+        using var unblock = await admin.PutAsJsonAsync($"/api/admin/users/{userLogin.User.Id}/block",
+            new { isBlocked = false });
+        Assert.Equal(HttpStatusCode.NoContent, unblock.StatusCode);
+        using var staleToken = await user.GetAsync("/api/auth/me");
+        Assert.Equal(HttpStatusCode.Unauthorized, staleToken.StatusCode);
+        using var restored = app.CreateClient();
+        var newLogin = await Login(restored, "blocked-user", "password@123");
+        Assert.Equal(userLogin.User.Id, newLogin.User.Id);
+        restored.DefaultRequestHeaders.Authorization = new("Bearer", newLogin.AccessToken);
+        using var listing = await restored.GetAsync("/api/space/folder-info");
+        Assert.Equal(HttpStatusCode.OK, listing.StatusCode);
+        Assert.Contains("keep.txt", await listing.Content.ReadAsStringAsync());
     }
 
     private static async Task<LoginResponse> Login(HttpClient client, string username = "admin", string password = "admin@123")

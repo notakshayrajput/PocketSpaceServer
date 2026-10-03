@@ -7,9 +7,17 @@ public sealed class FileRecord
     public string Backend { get; set; } = "FileSystem";
     public string RelativePath { get; set; } = null!;
     public string PathKey { get; set; } = null!;
+    public string ParentPathKey { get; set; } = null!;
+    public string Name { get; set; } = null!;
+    public string NameSortKey { get; set; } = null!;
+    public string OrdinalNameSortKey { get; set; } = null!;
     public bool IsFolder { get; set; }
+    public bool IsPresent { get; set; } = true;
     public bool IsFavorite { get; set; }
     public DateTime RecentAt { get; set; }
+    public long Size { get; set; }
+    public DateTime LastModified { get; set; }
+    public DateTime CreatedAt { get; set; }
     public string? TrashEntryId { get; set; }
 }
 

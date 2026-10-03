@@ -34,7 +34,7 @@ public class FileLibraryTests
         Assert.True(first.HasMore);
         Assert.Equal("item000.txt", first.Files[0].Name);
         Assert.Equal("item049.txt", first.Files[^1].Name);
-        Assert.Equal(50, await scope.ServiceProvider.GetRequiredService<ApplicationDbContext>().Files.CountAsync());
+        Assert.Equal(116, await scope.ServiceProvider.GetRequiredService<ApplicationDbContext>().Files.CountAsync());
 
         var second = (await client.GetFromJsonAsync<FolderInfo>("/api/space/folder-info?sortBy=name&direction=asc&offset=50"))!;
         var third = (await client.GetFromJsonAsync<FolderInfo>("/api/space/folder-info?sortBy=name&direction=asc&offset=100"))!;
@@ -197,11 +197,86 @@ public class FileLibraryTests
             await File.WriteAllTextAsync(path, "existing");
             File.SetLastWriteTimeUtc(path, app.Clock.Now.UtcDateTime.AddMinutes(i - 25));
         }
+        await scope.ServiceProvider.GetRequiredService<CatalogReconciler>()
+            .RefreshAsync(Principal(user), CancellationToken.None);
         var home = await Home(client);
         Assert.Equal(20, home.Recent.Length);
         Assert.Equal("file24.txt", home.Recent[0].Name);
         await Favorite(client, home.Recent[0].Id, true);
         Assert.Single((await Home(client)).Favorites);
+    }
+
+    [Fact]
+    public async Task ReconciliationEvictsCachedPagesAfterExternalChanges()
+    {
+        await using var app = new TestApplication();
+        using var client = app.CreateClient();
+        var user = await SignIn(client);
+        Assert.Empty((await client.GetFromJsonAsync<FolderInfo>("/api/space/folder-info"))!.Files);
+        Assert.Empty((await Home(client)).Recent);
+
+        using var scope = app.Services.CreateScope();
+        var principal = Principal(user);
+        var root = scope.ServiceProvider.GetRequiredService<UserStorage>().Root(principal);
+        var external = Path.Combine(root, "external.txt");
+        await File.WriteAllTextAsync(external, "new content");
+        await scope.ServiceProvider.GetRequiredService<CatalogReconciler>()
+            .RefreshAsync(principal, CancellationToken.None);
+        Assert.Equal("external.txt", Assert.Single((await client.GetFromJsonAsync<FolderInfo>(
+            "/api/space/folder-info"))!.Files).Name);
+        var discovered = Assert.Single((await Home(client)).Recent);
+        Assert.Equal("external.txt", discovered.Name);
+        await Favorite(client, discovered.Id, true);
+
+        await File.WriteAllTextAsync(external, "new and longer content");
+        await scope.ServiceProvider.GetRequiredService<CatalogReconciler>()
+            .RefreshAsync(principal, CancellationToken.None);
+        Assert.Equal(new FileInfo(external).Length, Assert.Single((await client.GetFromJsonAsync<FolderInfo>(
+            "/api/space/folder-info"))!.Files).Size);
+
+        File.Delete(external);
+        await scope.ServiceProvider.GetRequiredService<CatalogReconciler>()
+            .RefreshAsync(principal, CancellationToken.None);
+        Assert.Empty((await client.GetFromJsonAsync<FolderInfo>("/api/space/folder-info"))!.Files);
+        Assert.Empty((await Home(client)).Recent);
+        Assert.Empty((await Home(client)).Favorites);
+
+        await File.WriteAllTextAsync(external, "returned");
+        await scope.ServiceProvider.GetRequiredService<CatalogReconciler>()
+            .RefreshAsync(principal, CancellationToken.None);
+        var returned = Assert.Single((await Home(client)).Favorites);
+        Assert.Equal(discovered.Id, returned.Id);
+    }
+
+    [Fact]
+    public async Task ReconciliationBackfillsExistingRecordWithoutLosingFavoriteOrIdentity()
+    {
+        await using var app = new TestApplication();
+        using var client = app.CreateClient();
+        var user = await SignIn(client);
+        await Upload(client, "legacy.txt", "existing bytes");
+        var original = Assert.Single((await Home(client)).Recent);
+        await Favorite(client, original.Id, true);
+
+        using var scope = app.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        await db.Files.Where(file => file.Id == original.Id).ExecuteUpdateAsync(update => update
+            .SetProperty(file => file.Name, "")
+            .SetProperty(file => file.ParentPathKey, "")
+            .SetProperty(file => file.NameSortKey, "")
+            .SetProperty(file => file.OrdinalNameSortKey, "")
+            .SetProperty(file => file.Size, 0L)
+            .SetProperty(file => file.LastModified, DateTime.MinValue)
+            .SetProperty(file => file.CreatedAt, DateTime.MinValue));
+        await scope.ServiceProvider.GetRequiredService<CatalogReconciler>()
+            .RefreshAsync(Principal(user), CancellationToken.None);
+
+        var restored = Assert.Single((await Home(client)).Favorites);
+        Assert.Equal(original.Id, restored.Id);
+        Assert.Equal("legacy.txt", restored.Name);
+        Assert.Equal("existing bytes".Length, restored.Size);
+        Assert.Equal(original.Id, Assert.Single((await client.GetFromJsonAsync<FolderInfo>(
+            "/api/space/folder-info"))!.Files).Id);
     }
 
     [Fact]

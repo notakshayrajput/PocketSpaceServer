@@ -91,7 +91,7 @@ public class AuthController(UserManager<ApplicationUser> users, TokenService tok
             using var lease = await operations.AcquireAsync(user.Id, cancellationToken);
             var now = clock.GetUtcNow().UtcDateTime;
             // Coalesce repeated requests and never extend an account's approval deadline.
-            await db.Users.Where(u => u.Id == user.Id && u.PasswordResetRequestedAt == null &&
+            await db.Users.Where(u => u.Id == user.Id && !u.IsBlocked && u.PasswordResetRequestedAt == null &&
                 (u.Status == AccountStatus.Approved || (u.Status == AccountStatus.Pending && u.PendingExpiresAt > now)))
                 .ExecuteUpdateAsync(update => update.SetProperty(u => u.PasswordResetRequestedAt, now), cancellationToken);
         }

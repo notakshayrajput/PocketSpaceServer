@@ -24,8 +24,35 @@ public class AdminUsersController(ApplicationDbContext db, AccountOperationLocks
             .Where(u => u.Status == AccountStatus.Approved ||
                 (u.Status == AccountStatus.Pending && u.PendingExpiresAt > now))
             .OrderBy(u => u.UserName)
-            .Select(u => new { u.Id, Username = u.UserName, u.Status, u.QuotaBytes })
+            .Select(u => new { u.Id, Username = u.UserName, u.Status, u.QuotaBytes, u.IsBlocked,
+                IsAdmin = db.UserRoles.Any(ur => ur.UserId == u.Id &&
+                    db.Roles.Any(role => role.Id == ur.RoleId && role.Name == "Admin")) })
             .ToListAsync(cancellationToken));
+    }
+
+    [HttpPut("{id}/block")]
+    public async Task<IActionResult> SetBlocked(string id, SetBlockedRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (request.IsBlocked is null)
+            return BadRequest(new { message = "Specify whether the account should be blocked." });
+        if (id == User.FindFirst("sub")?.Value)
+            return Conflict(new { message = "You cannot block your own account." });
+        using var lease = await operations.AcquireAsync(id, cancellationToken);
+        var account = await users.FindByIdAsync(id);
+        if (account is null) return NotFound();
+        if (await users.IsInRoleAsync(account, "Admin"))
+            return Conflict(new { message = "Admin accounts cannot be blocked." });
+        var now = clock.GetUtcNow().UtcDateTime;
+        if (account.Status != AccountStatus.Approved &&
+            (account.Status != AccountStatus.Pending || account.PendingExpiresAt <= now))
+            return Conflict(new { message = "This account is no longer active." });
+        if (account.IsBlocked == request.IsBlocked.Value) return NoContent();
+        account.IsBlocked = request.IsBlocked.Value;
+        var result = await users.UpdateSecurityStampAsync(account);
+        if (!result.Succeeded)
+            return StatusCode(500, new { message = "Could not update this account." });
+        return NoContent();
     }
 
     [HttpPut("{id}/quota")]
@@ -50,7 +77,7 @@ public class AdminUsersController(ApplicationDbContext db, AccountOperationLocks
     public async Task<IActionResult> PasswordResetRequests(CancellationToken cancellationToken)
     {
         var now = clock.GetUtcNow().UtcDateTime;
-        return Ok(await db.Users.AsNoTracking().Where(u => u.PasswordResetRequestedAt != null &&
+        return Ok(await db.Users.AsNoTracking().Where(u => !u.IsBlocked && u.PasswordResetRequestedAt != null &&
             (u.Status == AccountStatus.Approved || (u.Status == AccountStatus.Pending && u.PendingExpiresAt > now)))
             .OrderBy(u => u.PasswordResetRequestedAt)
             .Select(u => new { u.Id, Username = u.UserName, u.PasswordResetRequestedAt })
@@ -111,3 +138,4 @@ public sealed class AdminResetPasswordRequest
 }
 
 public sealed record ChangeQuotaRequest(long QuotaBytes);
+public sealed record SetBlockedRequest(bool? IsBlocked);

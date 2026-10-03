@@ -10,7 +10,6 @@ using PocketSpaceServer.Data;
 using PocketSpaceServer.Models;
 using PocketSpaceServer.Storage;
 using System.Net.WebSockets;
-using System.Text;
 using System.Threading.RateLimiting;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -58,6 +57,11 @@ if (storageOptions.HasS3Credentials)
 builder.Services.AddScoped<StorageManager>();
 builder.Services.AddSingleton<GlobalStorageLock>();
 builder.Services.AddScoped<FileCatalog>();
+builder.Services.AddMemoryCache(options => options.SizeLimit = 512);
+builder.Services.AddSingleton<CatalogReadCache>();
+builder.Services.AddSingleton<CatalogReadiness>();
+builder.Services.AddScoped<CatalogReconciler>();
+builder.Services.AddHostedService<CatalogReconciliationWorker>();
 builder.Services.AddScoped<QuotaUsage>();
 builder.Services.AddScoped<TrashCleanup>();
 builder.Services.AddHostedService<TrashCleanupWorker>();
@@ -199,13 +203,6 @@ app.Map("/ws", async context =>
     var remaining = expiresAt - DateTimeOffset.UtcNow;
     if (remaining <= TimeSpan.Zero) return;
     connectionLifetime.CancelAfter(remaining);
-    var stateMessage = Encoding.UTF8.GetBytes("server-state:Idle");
-    await socket.SendAsync(
-        stateMessage,
-        WebSocketMessageType.Text,
-        endOfMessage: true,
-        connectionLifetime.Token);
-
     var buffer = new byte[1024];
     try
     {

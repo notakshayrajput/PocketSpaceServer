@@ -7,6 +7,34 @@ public static class FolderListing
 {
     public sealed record Entry(string Path, string Name, bool IsFolder, long Size, DateTime LastModified, DateTime CreatedAt);
 
+    // Lexically sortable representation of NaturalNameComparer. Numeric runs use
+    // their significant length and digits, so item2 sorts before item10.
+    public static string NaturalSortKey(string name)
+    {
+        var key = new StringBuilder(name.Length * 4);
+        for (var i = 0; i < name.Length;)
+        {
+            if (char.IsAsciiDigit(name[i]))
+            {
+                var start = i;
+                while (i < name.Length && char.IsAsciiDigit(name[i])) i++;
+                while (start < i && name[start] == '0') start++;
+                key.Append("0030").Append((i - start).ToString("X8", CultureInfo.InvariantCulture));
+                key.Append(name, start, i - start);
+            }
+            else key.Append(((int)char.ToUpperInvariant(name[i++])).ToString("X4", CultureInfo.InvariantCulture));
+        }
+        return key.ToString();
+    }
+
+    public static string OrdinalSortKey(string name)
+    {
+        var key = new StringBuilder(name.Length * 4);
+        foreach (var letter in name)
+            key.Append(((int)letter).ToString("X4", CultureInfo.InvariantCulture));
+        return key.ToString();
+    }
+
     public static Entry Read(string path)
     {
         if (Directory.Exists(path))

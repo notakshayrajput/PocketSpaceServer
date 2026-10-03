@@ -10,7 +10,7 @@ namespace PocketSpaceServer.Controllers;
 [Route("api/space")]
 [StorageErrors]
 public class SpaceController(UserStorage storage, StorageManager stores, FileCatalog catalog, QuotaUsage quotaUsage,
-    ApplicationDbContext db) : ControllerBase
+    CatalogReconciler reconciler, ApplicationDbContext db) : ControllerBase
 {
     [HttpGet("drive-stats")]
     public async Task<ActionResult<DriveStats>> GetStorageStats()
@@ -52,27 +52,18 @@ public class SpaceController(UserStorage storage, StorageManager stores, FileCat
         var path = storage.Resolve(User, relativePath);
         var folder = await backend.StatAsync(path);
         if (folder?.IsFolder != true) return NotFound(new { message = "Folder not found." });
-        var entries = await backend.ListAsync(path);
-        var matching = entries
-            .Where(entry => FolderListing.MatchesName(entry.Name, search))
-            .Select(entry => new FolderListing.Entry(entry.Path, entry.Name, entry.IsFolder, entry.Size,
-                entry.LastModified, entry.CreatedAt)).ToArray();
-        var pagePaths = FolderListing.Sort(matching, sortBy, direction)
-            .Skip(offset).Take(limit).Select(entry => entry.Path).ToArray();
-        var byPath = entries.ToDictionary(entry => entry.Path);
-        var pageItems = pagePaths.Select(pagePath => byPath[pagePath]).ToArray();
-        var records = await catalog.IndexAsync(User, pageItems);
-        // The listing already contains these attributes; avoid one more S3 HEAD per row.
-        var files = records.Select((record, index) => FileCatalog.Describe(record, pageItems[index])).ToArray();
+        await reconciler.EnsureReadyAsync(User, HttpContext.RequestAborted);
+        var relative = Path.GetRelativePath(root, path).Replace('\\', '/');
+        var (files, total) = await catalog.ListPageAsync(User, relative, search ?? "", sortBy, direction, offset, limit);
         return Ok(new FolderInfo
         {
             Name = path == root ? "My files" : Path.GetFileName(path),
             LastModified = folder.LastModified,
-            RelativePath = Path.GetRelativePath(root, path).Replace('\\', '/'),
+            RelativePath = relative,
             Files = files,
-            TotalCount = matching.Length,
+            TotalCount = total,
             NextOffset = offset + files.Length,
-            HasMore = offset + files.Length < matching.Length
+            HasMore = offset + files.Length < total
         });
     }
 
@@ -86,6 +77,7 @@ public class SpaceController(UserStorage storage, StorageManager stores, FileCat
         var path = storage.Resolve(User, Path.Combine(request.ParentPath, request.Name));
         if (await backend.StatAsync(path) is not null) return Conflict(new { message = "That name already exists." });
         await backend.CreateDirectoryAsync(path);
+        await catalog.IndexAsync(User, [await backend.StatAsync(path) ?? throw new IOException("Folder was not created.")]);
         return NoContent();
     }
 
@@ -116,7 +108,11 @@ public class SpaceController(UserStorage storage, StorageManager stores, FileCat
     }
 
     [HttpGet("home")]
-    public async Task<ActionResult<HomeFiles>> Home() => Ok(await catalog.HomeAsync(User));
+    public async Task<ActionResult<HomeFiles>> Home()
+    {
+        await reconciler.EnsureReadyAsync(User, HttpContext.RequestAborted);
+        return Ok(await catalog.HomeAsync(User));
+    }
 
     [HttpPut("files/{id}/favorite")]
     public async Task<IActionResult> Favorite(string id, FavoriteRequest request) =>
